@@ -1,0 +1,2 @@
+loguru
+datasets>=2.19
