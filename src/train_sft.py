@@ -16,6 +16,7 @@ from transformers import (
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from datasets import load_dataset
 from trl import SFTTrainer
+from huggingface_hub import login
 
 
 def format_example(prompt: str, response: Optional[str]) -> str:
@@ -99,9 +100,21 @@ def parse_args():
     return parser.parse_args()
 
 
+def init_hf_hub():
+    hf_token = os.getenv("HUGGINGFACE_HUB_TOKEN", None)
+    if hf_token is None:
+        logger.warning("HuggingFace token not found in HF_TOKEN env variable. Skipping login.")
+    else:
+        login(token=hf_token)
+        logger.info("Logged in to HuggingFace Hub.")
+
+
 def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
+    
+    init_hf_hub()
+    
     logger.info(f"Loading tokenizer for the base model: {args.model_name}")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
     if tokenizer.pad_token is None:
