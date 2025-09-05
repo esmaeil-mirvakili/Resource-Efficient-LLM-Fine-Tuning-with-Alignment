@@ -44,7 +44,7 @@ def tokenize_function(tokenizer: AutoTokenizer, max_len: int):
     return _fn
 
 
-class VramLoggingCallback(TrainerCallback):
+class WandbVramLoggingCallback(TrainerCallback):
     def on_log(self, args, state, control, **kwargs):
         if torch.cuda.is_available() and wandb.run is not None:
             peak_gb = torch.cuda.max_memory_reserved() / (1024**3)
@@ -199,6 +199,7 @@ def main():
         dataset_text_field=None,  # already tokenized
         packing=False,
         max_seq_length=args.max_seq_len,
+        callbacks=[WandbVramLoggingCallback()] if args.wandb_project else [],
     )
 
     logger.info("Starting training...")
