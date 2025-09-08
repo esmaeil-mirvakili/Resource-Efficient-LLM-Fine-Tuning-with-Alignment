@@ -37,6 +37,7 @@ def tokenize_function(tokenizer: AutoTokenizer, max_len: int):
             truncation=True,
             max_length=max_len,
             padding=False,
+            return_attention_mask=True,
         )
         # Let SFTTrainer handle labels from the same ids (causal LM)
         return {
@@ -214,43 +215,61 @@ def main():
     if args.wandb_project:
         os.environ.setdefault("WANDB_PROJECT", args.wandb_project)
 
-    # trainer = SFTTrainer(
-    #     model=model,
-    #     tokenizer=tokenizer,
-    #     train_dataset=tokenized["train"],
-    #     eval_dataset=tokenized["test"],
-    #     args=training_args,
-    #     dataset_text_field=None,  # already tokenized
-    #     packing=False,
-    #     max_seq_length=args.max_seq_len,
-    #     callbacks=[WandbVramLoggingCallback()] if args.wandb_project else [],
-    # )
+    def make_completion_collator(tokenizer, response_template="<|assistant|>\n"):
+        """
+        Data collator for SFT with causal LMs.
 
-    response_template = "<|assistant|>\n"
-    response_ids = tokenizer.encode(response_template, add_special_tokens=False)
+        Pads a batch of examples and sets labels for all prompt tokens to -100
+        (ignore index), so the loss is computed only on the assistant’s response.
+        This prevents the model from wasting capacity predicting the prompt.
+        """
+        resp_ids = tokenizer.encode(response_template, add_special_tokens=False)
 
-    def collate_fn(batch):
-        input_ids = [torch.tensor(ex["input_ids"]) for ex in batch]
-        attn_masks = [torch.tensor(ex["attention_mask"]) for ex in batch]
+        def find_sublist_start(seq_ids, pattern):
+            if not pattern:
+                return 0
+            # naive sublist search
+            for j in range(0, len(seq_ids) - len(pattern) + 1):
+                if seq_ids[j : j + len(pattern)] == pattern:
+                    return j + len(pattern)
+            return 0  # fallback if tag not found
 
-        # Pad
-        input_ids = pad_sequence(
-            input_ids, batch_first=True, padding_value=tokenizer.pad_token_id
-        )
-        attn_masks = pad_sequence(attn_masks, batch_first=True, padding_value=0)
+        def collate_fn(batch):
+            # tensors for input_ids
+            input_ids_list = [
+                torch.tensor(ex["input_ids"], dtype=torch.long) for ex in batch
+            ]
 
-        labels = input_ids.clone()
+            # attention masks: use provided if present, else all-ones
+            if "attention_mask" in batch[0]:
+                attn_list = [
+                    torch.tensor(ex["attention_mask"], dtype=torch.long) for ex in batch
+                ]
+            else:
+                attn_list = [
+                    torch.ones(len(ids), dtype=torch.long) for ids in input_ids_list
+                ]
 
-        # Mask out everything before the response tag
-        for i, seq in enumerate(input_ids):
-            idx = (
-                seq.tolist().index(response_ids[0])
-                if response_ids[0] in seq.tolist()
-                else 0
+            # pad
+            input_ids = pad_sequence(
+                input_ids_list, batch_first=True, padding_value=tokenizer.pad_token_id
             )
-            labels[i, :idx] = -100  # ignore prompt tokens
+            attention_mask = pad_sequence(attn_list, batch_first=True, padding_value=0)
 
-        return {"input_ids": input_ids, "attention_mask": attn_masks, "labels": labels}
+            # labels = input_ids, but mask prompt tokens with -100 (ignore index)
+            labels = input_ids.clone()
+            for i, seq in enumerate(input_ids_list):
+                seq_ids = seq.tolist()
+                start = find_sublist_start(seq_ids, resp_ids)
+                labels[i, :start] = -100
+
+            return {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "labels": labels,
+            }
+
+        return collate_fn
 
     eval_split = "validation" if "validation" in tokenized else "test"
 
@@ -259,7 +278,7 @@ def main():
         args=training_args,
         train_dataset=tokenized["train"],
         eval_dataset=tokenized[eval_split],
-        data_collator=collate_fn,
+        data_collator=make_completion_collator(tokenizer),
         callbacks=[WandbVramLoggingCallback()] if args.wandb_project else [],
     )
 
