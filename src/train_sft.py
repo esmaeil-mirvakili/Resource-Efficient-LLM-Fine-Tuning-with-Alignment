@@ -103,7 +103,9 @@ def parse_args():
 def init_hf_hub():
     hf_token = os.getenv("HUGGINGFACE_HUB_TOKEN", None)
     if hf_token is None:
-        logger.warning("HuggingFace token not found in HF_TOKEN env variable. Skipping login.")
+        logger.warning(
+            "HuggingFace token not found in HF_TOKEN env variable. Skipping login."
+        )
     else:
         login(token=hf_token)
         logger.info("Logged in to HuggingFace Hub.")
@@ -112,9 +114,9 @@ def init_hf_hub():
 def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
-    
+
     init_hf_hub()
-    
+
     logger.info(f"Loading tokenizer for the base model: {args.model_name}")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
     if tokenizer.pad_token is None:
@@ -192,7 +194,7 @@ def main():
         bf16=use_bf16,
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
-        evaluation_strategy="steps",
+        eval_strategy="steps",
         eval_steps=args.eval_steps,
         do_eval=True,
         report_to=["wandb"] if args.wandb_project else [],
@@ -203,15 +205,23 @@ def main():
     if args.wandb_project:
         os.environ.setdefault("WANDB_PROJECT", args.wandb_project)
 
+    # trainer = SFTTrainer(
+    #     model=model,
+    #     tokenizer=tokenizer,
+    #     train_dataset=tokenized["train"],
+    #     eval_dataset=tokenized["test"],
+    #     args=training_args,
+    #     dataset_text_field=None,  # already tokenized
+    #     packing=False,
+    #     max_seq_length=args.max_seq_len,
+    #     callbacks=[WandbVramLoggingCallback()] if args.wandb_project else [],
+    # )
+    
     trainer = SFTTrainer(
         model=model,
-        tokenizer=tokenizer,
+        args=training_args,
         train_dataset=tokenized["train"],
         eval_dataset=tokenized["test"],
-        args=training_args,
-        dataset_text_field=None,  # already tokenized
-        packing=False,
-        max_seq_length=args.max_seq_len,
         callbacks=[WandbVramLoggingCallback()] if args.wandb_project else [],
     )
 
