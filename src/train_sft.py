@@ -5,6 +5,7 @@ import os
 from typing import Dict, List, Optional
 from loguru import logger
 import torch
+from torch.nn.utils.rnn import pad_sequence
 import wandb
 from transformers import (
     AutoModelForCausalLM,
@@ -12,6 +13,7 @@ from transformers import (
     BitsAndBytesConfig,
     TrainerCallback,
     TrainingArguments,
+    set_seed
 )
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from datasets import load_dataset
@@ -85,6 +87,7 @@ def parse_args():
     parser.add_argument(
         "--max_steps", type=int, default=-1, help="If >0, overrides epochs"
     )
+    parser.add_argument("--grad_ckpt", action="store_true", default=False, help="Use gradient checkpointing")
 
     # LoRA
     parser.add_argument("--lora_r", type=int, default=64)
@@ -104,7 +107,7 @@ def init_hf_hub():
     hf_token = os.getenv("HUGGINGFACE_HUB_TOKEN", None)
     if hf_token is None:
         logger.warning(
-            "HuggingFace token not found in HF_TOKEN env variable. Skipping login."
+            "HuggingFace token not found in HUGGINGFACE_HUB_TOKEN env variable. Skipping login."
         )
     else:
         login(token=hf_token)
@@ -116,6 +119,8 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     init_hf_hub()
+
+    set_seed(args.seed)
 
     logger.info(f"Loading tokenizer for the base model: {args.model_name}")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
@@ -161,6 +166,10 @@ def main():
         task_type="CAUSAL_LM",
     )
     model = get_peft_model(model, lora_cfg)
+    # turn off KV cache for training
+    model.config.use_cache = False
+    # set model pad token id
+    model.config.pad_token_id = tokenizer.pad_token_id
 
     # Load dataset(s)
     data_files = {"train": args.train_file}
@@ -216,12 +225,41 @@ def main():
     #     max_seq_length=args.max_seq_len,
     #     callbacks=[WandbVramLoggingCallback()] if args.wandb_project else [],
     # )
-    
+
+    response_template = "<|assistant|>\n"
+    response_ids = tokenizer.encode(response_template, add_special_tokens=False)
+
+    def collate_fn(batch):
+        input_ids = [torch.tensor(ex["input_ids"]) for ex in batch]
+        attn_masks = [torch.tensor(ex["attention_mask"]) for ex in batch]
+
+        # Pad
+        input_ids = pad_sequence(
+            input_ids, batch_first=True, padding_value=tokenizer.pad_token_id
+        )
+        attn_masks = pad_sequence(attn_masks, batch_first=True, padding_value=0)
+
+        labels = input_ids.clone()
+
+        # Mask out everything before the response tag
+        for i, seq in enumerate(input_ids):
+            idx = (
+                seq.tolist().index(response_ids[0])
+                if response_ids[0] in seq.tolist()
+                else 0
+            )
+            labels[i, :idx] = -100  # ignore prompt tokens
+
+        return {"input_ids": input_ids, "attention_mask": attn_masks, "labels": labels}
+
+    eval_split = "validation" if "validation" in tokenized else "test"
+
     trainer = SFTTrainer(
         model=model,
         args=training_args,
         train_dataset=tokenized["train"],
-        eval_dataset=tokenized["test"],
+        eval_dataset=tokenized[eval_split],
+        data_collator=collate_fn,
         callbacks=[WandbVramLoggingCallback()] if args.wandb_project else [],
     )
 
