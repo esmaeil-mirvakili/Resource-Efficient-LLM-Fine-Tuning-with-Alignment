@@ -88,7 +88,7 @@ def parse_args():
     parser.add_argument(
         "--max_steps", type=int, default=-1, help="If >0, overrides epochs"
     )
-    parser.add_argument("--grad_ckpt", action="store_true", default=False, help="Use gradient checkpointing")
+    parser.add_argument("--grad_ckpt", type=bool, default=False, help="Use gradient checkpointing")
 
     # LoRA
     parser.add_argument("--lora_r", type=int, default=64)
