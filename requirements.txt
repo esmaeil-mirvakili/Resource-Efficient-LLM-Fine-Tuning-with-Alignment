@@ -1,3 +1,6 @@
+torch==2.1.0
+torchvision==0.16.0
+torchaudio==2.1.0
 loguru
 datasets>=2.19
 wandb
@@ -6,3 +9,4 @@ peft>=0.11
 bitsandbytes>=0.43
 trl>=0.9
 huggingface_hub
+
