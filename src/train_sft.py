@@ -243,6 +243,11 @@ def main():
     # gradient checkpointing
     if args.grad_ckpt:
         model.gradient_checkpointing_enable()
+        
+    for n, p in model.named_parameters():
+        if p.requires_grad:
+            print(n, p.shape)
+
 
     # Load dataset(s)
     data_files = {"train": args.train_file}
@@ -347,6 +352,7 @@ def main():
         return collate_fn
 
     eval_split = "validation" if "validation" in tokenized else "test"
+    print(f"Using {eval_split} split for evaluation => ", len(tokenized[eval_split]) if eval_split in tokenized else 0)
 
     trainer = SFTTrainer(
         model=model,
