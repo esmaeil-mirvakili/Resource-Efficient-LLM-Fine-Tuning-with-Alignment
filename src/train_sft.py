@@ -2,6 +2,8 @@
 
 import argparse
 import os
+import math
+import time
 from typing import Dict, List, Optional
 from loguru import logger
 import torch
@@ -48,11 +50,81 @@ def tokenize_function(tokenizer: AutoTokenizer, max_len: int):
     return _fn
 
 
-class WandbVramLoggingCallback(TrainerCallback):
+class VramPeakCallback(TrainerCallback):
     def on_log(self, args, state, control, **kwargs):
         if torch.cuda.is_available() and wandb.run is not None:
             peak_gb = torch.cuda.max_memory_reserved() / (1024**3)
             wandb.log({"train/peak_vram_gb": peak_gb}, step=state.global_step)
+
+
+class EvalPerplexityCallback(TrainerCallback):
+    """Logs eval/perplexity from eval_loss."""
+    def on_evaluate(self, args, state, control, **kwargs):
+        if wandb.run is None:
+            return
+        metrics = kwargs.get("metrics", {})
+        if "eval_loss" in metrics:
+            ppl = (
+                math.exp(metrics["eval_loss"])
+                if metrics["eval_loss"] < 20
+                else float("inf")
+            )
+            wandb.log({"eval/perplexity": ppl}, step=state.global_step)
+
+
+class TokensPerSecCallback(TrainerCallback):
+    """Estimates and logs training tokens/sec at each logging step."""
+
+    def __init__(self, seq_len_estimate: int):
+        self.seq_len = seq_len_estimate
+        self.last_t = None
+        self.last_step = 0
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        self.last_t = time.time()
+        self.last_step = 0
+
+    def on_log(self, args, state, control, **kwargs):
+        if wandb.run is None:
+            return
+        now = time.time()
+        steps = state.global_step - self.last_step
+        dt = max(now - (self.last_t or now), 1e-9)
+
+        world = getattr(args, "world_size", 1) or 1
+        toks = (
+            steps
+            * args.per_device_train_batch_size
+            * args.gradient_accumulation_steps
+            * world
+            * self.seq_len
+        )
+        wandb.log({"train/tokens_per_sec": toks / dt}, step=state.global_step)
+
+        self.last_t, self.last_step = now, state.global_step
+
+
+class StepTimeMsCallback(TrainerCallback):
+    """Logs average step time in milliseconds between logging events."""
+
+    def __init__(self):
+        self.last_t = None
+        self.last_step = 0
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        self.last_t = time.time()
+        self.last_step = 0
+
+    def on_log(self, args, state, control, **kwargs):
+        if wandb.run is None:
+            return
+        now = time.time()
+        steps = state.global_step - self.last_step
+        dt = max(now - (self.last_t or now), 1e-9)
+        if steps > 0:
+            step_time_ms = (dt / steps) * 1000.0
+            wandb.log({"train/step_time_ms": step_time_ms}, step=state.global_step)
+        self.last_t, self.last_step = now, state.global_step
 
 
 def parse_args():
@@ -279,7 +351,16 @@ def main():
         train_dataset=tokenized["train"],
         eval_dataset=tokenized[eval_split],
         data_collator=make_completion_collator(tokenizer),
-        callbacks=[WandbVramLoggingCallback()] if args.wandb_project else [],
+        callbacks=(
+            [
+                VramPeakCallback(),
+                EvalPerplexityCallback(),
+                TokensPerSecCallback(seq_len_estimate=args.max_seq_len),
+                StepTimeMsCallback(),
+            ]
+            if args.wandb_project
+            else []
+        ),
     )
 
     logger.info("Starting training...")
