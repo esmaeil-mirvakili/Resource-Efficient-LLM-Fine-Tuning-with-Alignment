@@ -72,7 +72,7 @@ class EvalPerplexityCallback(TrainerCallback):
             wandb.log({"eval/perplexity": ppl}, step=state.global_step)
 
 
-class TokensPerSecCallback(TrainerCallback):
+class TokensPerSecAndStepTimeCallback(TrainerCallback):
     """Estimates and logs training tokens/sec at each logging step."""
 
     def __init__(self, seq_len_estimate: int):
@@ -91,7 +91,7 @@ class TokensPerSecCallback(TrainerCallback):
         steps = state.global_step - self.last_step
         dt = max(now - (self.last_t or now), 1e-9)
 
-        world = getattr(args, "world_size", 1) or 1
+        world = getattr(args, "world_size", 1)
         toks = (
             steps
             * args.per_device_train_batch_size
@@ -99,31 +99,11 @@ class TokensPerSecCallback(TrainerCallback):
             * world
             * self.seq_len
         )
-        wandb.log({"train/tokens_per_sec": toks / dt}, step=state.global_step)
-
-        self.last_t, self.last_step = now, state.global_step
-
-
-class StepTimeMsCallback(TrainerCallback):
-    """Logs average step time in milliseconds between logging events."""
-
-    def __init__(self):
-        self.last_t = None
-        self.last_step = 0
-
-    def on_train_begin(self, args, state, control, **kwargs):
-        self.last_t = time.time()
-        self.last_step = 0
-
-    def on_log(self, args, state, control, **kwargs):
-        if wandb.run is None:
-            return
-        now = time.time()
-        steps = state.global_step - self.last_step
-        dt = max(now - (self.last_t or now), 1e-9)
         if steps > 0:
             step_time_ms = (dt / steps) * 1000.0
             wandb.log({"train/step_time_ms": step_time_ms}, step=state.global_step)
+            wandb.log({"train/tokens_per_sec": toks / dt}, step=state.global_step)
+
         self.last_t, self.last_step = now, state.global_step
 
 
@@ -355,8 +335,7 @@ def main():
             [
                 VramPeakCallback(),
                 EvalPerplexityCallback(),
-                TokensPerSecCallback(seq_len_estimate=args.max_seq_len),
-                StepTimeMsCallback(),
+                TokensPerSecAndStepTimeCallback(seq_len_estimate=args.max_seq_len),
             ]
             if args.wandb_project
             else []
