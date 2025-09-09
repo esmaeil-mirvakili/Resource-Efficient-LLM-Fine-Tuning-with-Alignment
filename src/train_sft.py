@@ -52,6 +52,8 @@ def tokenize_function(tokenizer: AutoTokenizer, max_len: int):
 
 class VramPeakCallback(TrainerCallback):
     def on_log(self, args, state, control, **kwargs):
+        if not getattr(state, "is_local_process_zero", True):
+            return
         if torch.cuda.is_available() and wandb.run is not None:
             peak_gb = torch.cuda.max_memory_reserved() / (1024**3)
             wandb.log({"train/peak_vram_gb": peak_gb}, step=state.global_step)
@@ -60,6 +62,8 @@ class VramPeakCallback(TrainerCallback):
 class EvalPerplexityCallback(TrainerCallback):
     """Logs eval/perplexity from eval_loss."""
     def on_evaluate(self, args, state, control, **kwargs):
+        if not getattr(state, "is_local_process_zero", True):
+            return
         if wandb.run is None:
             return
         metrics = kwargs.get("metrics", {})
@@ -85,6 +89,8 @@ class TokensPerSecAndStepTimeCallback(TrainerCallback):
         self.last_step = 0
 
     def on_log(self, args, state, control, **kwargs):
+        if not getattr(state, "is_local_process_zero", True):
+            return
         if wandb.run is None:
             return
         now = time.time()
@@ -140,7 +146,14 @@ def parse_args():
     parser.add_argument(
         "--max_steps", type=int, default=-1, help="If >0, overrides epochs"
     )
-    parser.add_argument("--grad_ckpt", type=bool, default=False, help="Use gradient checkpointing")
+    parser.add_argument(
+        "--grad_ckpt", type=bool, default=False, help="Use gradient checkpointing"
+    )
+    parser.add_argument(
+        "--ds_config", type=str, default=None, help="DeepSpeed config JSON file path"
+    )
+    parser.add_argument("--ddp_find_unused_parameters", type=bool, default=False, help="For DDP")
+    parser.add_argument("--dataloader_num_workers", type=int, default=2)
 
     # LoRA
     parser.add_argument("--lora_r", type=int, default=64)
@@ -165,6 +178,10 @@ def init_hf_hub():
     else:
         login(token=hf_token)
         logger.info("Logged in to HuggingFace Hub.")
+
+
+def in_distributed_mode() -> bool:
+    return int(os.environ.get("WORLD_SIZE", "1")) > 1
 
 
 def main():
@@ -194,7 +211,7 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name,
         quantization_config=bnb_config,
-        device_map="auto",
+        device_map=None if in_distributed_mode() else "auto",
         trust_remote_code=True,
     )
 
@@ -223,6 +240,9 @@ def main():
     model.config.use_cache = False
     # set model pad token id
     model.config.pad_token_id = tokenizer.pad_token_id
+    # gradient checkpointing
+    if args.grad_ckpt:
+        model.gradient_checkpointing_enable()
 
     # Load dataset(s)
     data_files = {"train": args.train_file}
@@ -262,6 +282,9 @@ def main():
         report_to=["wandb"] if args.wandb_project else [],
         run_name=args.run_name,
         seed=args.seed,
+        deepspeed=args.ds_config,
+        ddp_find_unused_parameters=args.ddp_find_unused_parameters,
+        dataloader_num_workers=args.dataloader_num_workers,
     )
 
     if args.wandb_project:

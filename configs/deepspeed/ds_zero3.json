@@ -1,0 +1,26 @@
+{
+    "zero_optimization": {
+        "stage": 3,
+        "overlap_comm": true,
+        "contiguous_gradients": true,
+        "reduce_bucket_size": "auto",
+        "stage3_param_persistence_threshold": 10000,
+        "stage3_prefetch_bucket_size": "auto",
+        "stage3_max_live_parameters": 1e9
+    },
+    "bf16": {
+        "enabled": true
+    },
+    "fp16": {
+        "enabled": false
+    },
+    "train_micro_batch_size_per_gpu": "auto",
+    "gradient_accumulation_steps": "auto",
+    "aio": {
+        "block_size": 1048576,
+        "queue_depth": 8,
+        "single_submit": false,
+        "overlap_events": true
+    },
+    "steps_per_print": 0
+}
