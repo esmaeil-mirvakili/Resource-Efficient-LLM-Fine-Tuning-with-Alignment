@@ -62,10 +62,12 @@ class VramPeakCallback(TrainerCallback):
 class EvalPerplexityCallback(TrainerCallback):
     """Logs eval/perplexity from eval_loss."""
     def on_evaluate(self, args, state, control, **kwargs):
+        print("eval starts")
         if not getattr(state, "is_local_process_zero", True):
             return
         if wandb.run is None:
             return
+        print("EvalPerplexityCallback.on_evaluate", kwargs.get("metrics", {}))
         metrics = kwargs.get("metrics", {})
         if "eval_loss" in metrics:
             ppl = (
@@ -243,11 +245,10 @@ def main():
     # gradient checkpointing
     if args.grad_ckpt:
         model.gradient_checkpointing_enable()
-        
+
     for n, p in model.named_parameters():
         if p.requires_grad:
             print(n, p.shape)
-
 
     # Load dataset(s)
     data_files = {"train": args.train_file}
@@ -353,6 +354,12 @@ def main():
 
     eval_split = "validation" if "validation" in tokenized else "test"
     print(f"Using {eval_split} split for evaluation => ", len(tokenized[eval_split]) if eval_split in tokenized else 0)
+    print(
+        "Args:",
+        training_args.eval_strategy,
+        training_args.eval_steps,
+        training_args.report_to,
+    )
 
     trainer = SFTTrainer(
         model=model,
