@@ -75,7 +75,7 @@ class EvalPerplexityCallback(TrainerCallback):
                 if metrics["eval_loss"] < 20
                 else float("inf")
             )
-            wandb.log({"eval/perplexity": ppl}, step=state.global_step)
+            wandb.log({"eval/perplexity": ppl})
 
 
 class TokensPerSecAndStepTimeCallback(TrainerCallback):
@@ -246,15 +246,22 @@ def main():
     if args.grad_ckpt:
         model.gradient_checkpointing_enable()
 
-    for n, p in model.named_parameters():
-        if p.requires_grad:
-            print(n, p.shape)
+    n_total = sum(p.numel() for p in model.parameters())
+    n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info(f"trainable params: {n_train} / {n_total} ({100*n_train/n_total:.4f}%)")
+    assert n_train > 0, "No trainable parameters found!"
 
     # Load dataset(s)
     data_files = {"train": args.train_file}
     if args.eval_file:
         data_files["validation"] = args.eval_file
     raw = load_dataset("json", data_files=data_files)
+
+    def _has_nonempty_response(ex):
+        r = ex.get("response")
+        return isinstance(r, str) and len(r.strip()) > 0
+
+    raw = raw.filter(_has_nonempty_response)
 
     if "validation" not in raw:
         raw = raw["train"].train_test_split(test_size=args.eval_ratio, seed=args.seed)
@@ -291,6 +298,7 @@ def main():
         deepspeed=args.ds_config,
         ddp_find_unused_parameters=args.ddp_find_unused_parameters,
         dataloader_num_workers=args.dataloader_num_workers,
+        max_grad_norm=1.0,
     )
 
     if args.wandb_project:
@@ -353,13 +361,6 @@ def main():
         return collate_fn
 
     eval_split = "validation" if "validation" in tokenized else "test"
-    print(f"Using {eval_split} split for evaluation => ", len(tokenized[eval_split]) if eval_split in tokenized else 0)
-    print(
-        "Args:",
-        training_args.eval_strategy,
-        training_args.eval_steps,
-        training_args.report_to,
-    )
 
     trainer = SFTTrainer(
         model=model,
@@ -377,6 +378,31 @@ def main():
             else []
         ),
     )
+
+    def simple_label_check(dataloader, num_batches=5, min_ok_ratio=0.8):
+        """Quick sanity check across a few batches."""
+        total = 0
+        good = 0
+
+        for i, batch in enumerate(dataloader):
+            if i >= num_batches:
+                break
+            labels = batch["labels"]
+            # Count how many samples in this batch have at least one supervised token
+            supervised = (labels != -100).any(dim=1)
+            total += labels.size(0)
+            good += supervised.sum().item()
+
+        ratio = good / total if total else 0
+        print(f"[check] {good}/{total} samples had supervised tokens (ratio={ratio:.2f})")
+
+        assert ratio >= min_ok_ratio, (
+            f"Too many empty/fully masked samples (only {ratio:.2%} good). "
+            f"Check your data formatting or collator."
+        )
+
+    # Run before trainer.train()
+    simple_label_check(trainer.get_train_dataloader(), num_batches=5, min_ok_ratio=0.8)
 
     logger.info("Starting training...")
     if torch.cuda.is_available():
