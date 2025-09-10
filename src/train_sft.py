@@ -192,7 +192,7 @@ def main():
         args.model_name,
         quantization_config=bnb_config,
         device_map=None if in_distributed_mode() else "auto",
-        torch_dtype=torch.bfloat16 if bf16_supported else torch.float16,
+        dtype=torch.bfloat16 if bf16_supported else torch.float16,
         trust_remote_code=True,
         attn_implementation="flash_attention_2",
     )
@@ -244,10 +244,8 @@ def main():
 
     def format_example(example):
         return {
-            "messages": [
-                {"role": "user", "content": example["prompt"]},
-                {"role": "assistant", "content": example["response"]},
-            ]
+            "prompt": example["prompt"],
+            "completion": example["response"],
         }
 
     dataset = dataset.map(format_example, remove_columns=dataset["train"].column_names)
@@ -270,6 +268,8 @@ def main():
         gradient_checkpointing_kwargs=(
             {"use_reentrant": True} if args.grad_ckpt else None
         ),
+        max_seq_length=args.max_seq_len,
+        weight_decay=args.weight_decay,
         learning_rate=args.learning_rate,
         num_train_epochs=args.num_train_epochs,
         optim="paged_adamw_8bit",
@@ -292,7 +292,7 @@ def main():
         max_grad_norm=1.0,
         load_best_model_at_end=True,
         metric_for_best_model="loss",
-        assistant_only_loss=True,
+        completion_only_loss=True,
     )
 
     eval_split = "validation" if "validation" in dataset else "test"
