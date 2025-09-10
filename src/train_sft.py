@@ -180,7 +180,9 @@ def main():
         wandb.define_metric("*", step_metric="global_step")
 
     logger.info(f"Loading tokenizer for the base model: {args.model_name}")
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model_name, add_prefix_space=True, use_fast=False
+    )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
