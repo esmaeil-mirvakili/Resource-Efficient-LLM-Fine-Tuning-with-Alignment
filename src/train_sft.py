@@ -15,39 +15,12 @@ from transformers import (
     BitsAndBytesConfig,
     TrainerCallback,
     TrainingArguments,
-    set_seed
+    set_seed,
 )
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from peft import LoraConfig
 from datasets import load_dataset
-from trl import SFTTrainer
+from trl import SFTTrainer, DataCollatorForCompletionOnlyLM
 from huggingface_hub import login
-
-
-def format_example(prompt: str, response: Optional[str]) -> str:
-    # Minimal, deterministic template
-    # Note: For training, both prompt and response are included; inference code should stop at assistant tag.
-    if response is None:
-        response = ""
-    return f"<|user|>\n{prompt}\n<|assistant|>\n{response}".strip()
-
-
-def tokenize_function(tokenizer: AutoTokenizer, max_len: int):
-    def _fn(ex: Dict[str, str]) -> Dict[str, List[int]]:
-        text = format_example(ex["prompt"], ex.get("response"))
-        tokens = tokenizer(
-            text,
-            truncation=True,
-            max_length=max_len,
-            padding=False,
-            return_attention_mask=True,
-        )
-        # Let SFTTrainer handle labels from the same ids (causal LM)
-        return {
-            "input_ids": tokens["input_ids"],
-            "attention_mask": tokens["attention_mask"],
-        }
-
-    return _fn
 
 
 class VramPeakCallback(TrainerCallback):
@@ -61,6 +34,7 @@ class VramPeakCallback(TrainerCallback):
 
 class EvalPerplexityCallback(TrainerCallback):
     """Logs eval/perplexity from eval_loss."""
+
     def on_evaluate(self, args, state, control, **kwargs):
         print("eval starts")
         if not getattr(state, "is_local_process_zero", True):
@@ -154,7 +128,9 @@ def parse_args():
     parser.add_argument(
         "--ds_config", type=str, default=None, help="DeepSpeed config JSON file path"
     )
-    parser.add_argument("--ddp_find_unused_parameters", type=bool, default=False, help="For DDP")
+    parser.add_argument(
+        "--ddp_find_unused_parameters", type=bool, default=False, help="For DDP"
+    )
     parser.add_argument("--dataloader_num_workers", type=int, default=2)
 
     # LoRA
@@ -194,6 +170,9 @@ def main():
 
     set_seed(args.seed)
 
+    if args.wandb_project:
+        os.environ.setdefault("WANDB_PROJECT", args.wandb_project)
+
     logger.info(f"Loading tokenizer for the base model: {args.model_name}")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
     if tokenizer.pad_token is None:
@@ -214,8 +193,17 @@ def main():
         args.model_name,
         quantization_config=bnb_config,
         device_map=None if in_distributed_mode() else "auto",
+        torch_dtype=torch.bfloat16 if bf16_supported else torch.float16,
         trust_remote_code=True,
+        attn_implementation="flash_attention_2",
     )
+    # turn off KV cache for training
+    model.config.use_cache = False
+    # set model pad token id
+    model.config.pad_token_id = tokenizer.pad_token_id
+    # gradient checkpointing
+    if args.grad_ckpt:
+        model.gradient_checkpointing_enable()
 
     # Prepare for k-bit training and wrap with LoRA
     # Common Mistral/LLaMA MLP+Attention proj layers
@@ -228,7 +216,7 @@ def main():
         "up_proj",
         "down_proj",
     ]
-    model = prepare_model_for_kbit_training(model)
+
     lora_cfg = LoraConfig(
         r=args.lora_r,
         lora_alpha=args.lora_alpha,
@@ -237,14 +225,6 @@ def main():
         bias="none",
         task_type="CAUSAL_LM",
     )
-    model = get_peft_model(model, lora_cfg)
-    # turn off KV cache for training
-    model.config.use_cache = False
-    # set model pad token id
-    model.config.pad_token_id = tokenizer.pad_token_id
-    # gradient checkpointing
-    if args.grad_ckpt:
-        model.gradient_checkpointing_enable()
 
     n_total = sum(p.numel() for p in model.parameters())
     n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -255,23 +235,20 @@ def main():
     data_files = {"train": args.train_file}
     if args.eval_file:
         data_files["validation"] = args.eval_file
-    raw = load_dataset("json", data_files=data_files)
+    dataset = load_dataset("json", data_files=data_files)
 
     def _has_nonempty_response(ex):
         r = ex.get("response")
         return isinstance(r, str) and len(r.strip()) > 0
 
-    raw = raw.filter(_has_nonempty_response)
+    dataset = dataset.filter(_has_nonempty_response)
 
-    if "validation" not in raw:
-        raw = raw["train"].train_test_split(test_size=args.eval_ratio, seed=args.seed)
+    if "validation" not in dataset:
+        dataset = dataset["train"].train_test_split(test_size=args.eval_ratio, seed=args.seed)
 
-    # Tokenize
-    tok_fn = tokenize_function(tokenizer, args.max_seq_len)
-    tokenized = raw.map(tok_fn, remove_columns=raw["train"].column_names)
-    logger.info(f"Train dataset size: {len(tokenized['train'])}")
-    if "validation" in tokenized:
-        logger.info(f"Validation dataset size: {len(tokenized['validation'])}")
+    logger.info(f"Train dataset size: {len(dataset['train'])}")
+    if "validation" in dataset:
+        logger.info(f"Validation dataset size: {len(dataset['validation'])}")
 
     # TrainingArguments
     use_bf16 = bf16_supported
@@ -280,8 +257,13 @@ def main():
         per_device_train_batch_size=args.per_device_train_batch_size,
         per_device_eval_batch_size=args.per_device_eval_batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
+        gradient_checkpointing=args.grad_ckpt,
+        gradient_checkpointing_kwargs=(
+            {"use_reentrant": True} if args.grad_ckpt else None
+        ),
         learning_rate=args.learning_rate,
         num_train_epochs=args.num_train_epochs,
+        optim="paged_adamw_8bit",
         max_steps=args.max_steps,
         lr_scheduler_type=args.lr_scheduler_type,
         warmup_ratio=args.warmup_ratio,
@@ -299,75 +281,87 @@ def main():
         ddp_find_unused_parameters=args.ddp_find_unused_parameters,
         dataloader_num_workers=args.dataloader_num_workers,
         max_grad_norm=1.0,
+        load_best_model_at_end=True,
+        metric_for_best_model="loss",
     )
 
-    if args.wandb_project:
-        os.environ.setdefault("WANDB_PROJECT", args.wandb_project)
+    # def make_completion_collator(tokenizer, response_template="<|assistant|>\n"):
+    #     """
+    #     Data collator for SFT with causal LMs.
 
-    def make_completion_collator(tokenizer, response_template="<|assistant|>\n"):
-        """
-        Data collator for SFT with causal LMs.
+    #     Pads a batch of examples and sets labels for all prompt tokens to -100
+    #     (ignore index), so the loss is computed only on the assistant’s response.
+    #     This prevents the model from wasting capacity predicting the prompt.
+    #     """
+    #     resp_ids = tokenizer.encode(response_template, add_special_tokens=False)
 
-        Pads a batch of examples and sets labels for all prompt tokens to -100
-        (ignore index), so the loss is computed only on the assistant’s response.
-        This prevents the model from wasting capacity predicting the prompt.
-        """
-        resp_ids = tokenizer.encode(response_template, add_special_tokens=False)
+    #     def find_sublist_start(seq_ids, pattern):
+    #         if not pattern:
+    #             return 0
+    #         # naive sublist search
+    #         for j in range(0, len(seq_ids) - len(pattern) + 1):
+    #             if seq_ids[j : j + len(pattern)] == pattern:
+    #                 return j + len(pattern)
+    #         return 0  # fallback if tag not found
 
-        def find_sublist_start(seq_ids, pattern):
-            if not pattern:
-                return 0
-            # naive sublist search
-            for j in range(0, len(seq_ids) - len(pattern) + 1):
-                if seq_ids[j : j + len(pattern)] == pattern:
-                    return j + len(pattern)
-            return 0  # fallback if tag not found
+    #     def collate_fn(batch):
+    #         # tensors for input_ids
+    #         input_ids_list = [
+    #             torch.tensor(ex["input_ids"], dtype=torch.long) for ex in batch
+    #         ]
 
-        def collate_fn(batch):
-            # tensors for input_ids
-            input_ids_list = [
-                torch.tensor(ex["input_ids"], dtype=torch.long) for ex in batch
-            ]
+    #         # attention masks: use provided if present, else all-ones
+    #         if "attention_mask" in batch[0]:
+    #             attn_list = [
+    #                 torch.tensor(ex["attention_mask"], dtype=torch.long) for ex in batch
+    #             ]
+    #         else:
+    #             attn_list = [
+    #                 torch.ones(len(ids), dtype=torch.long) for ids in input_ids_list
+    #             ]
 
-            # attention masks: use provided if present, else all-ones
-            if "attention_mask" in batch[0]:
-                attn_list = [
-                    torch.tensor(ex["attention_mask"], dtype=torch.long) for ex in batch
-                ]
-            else:
-                attn_list = [
-                    torch.ones(len(ids), dtype=torch.long) for ids in input_ids_list
-                ]
+    #         # pad
+    #         input_ids = pad_sequence(
+    #             input_ids_list, batch_first=True, padding_value=tokenizer.pad_token_id
+    #         )
+    #         attention_mask = pad_sequence(attn_list, batch_first=True, padding_value=0)
 
-            # pad
-            input_ids = pad_sequence(
-                input_ids_list, batch_first=True, padding_value=tokenizer.pad_token_id
-            )
-            attention_mask = pad_sequence(attn_list, batch_first=True, padding_value=0)
+    #         # labels = input_ids, but mask prompt tokens with -100 (ignore index)
+    #         labels = input_ids.clone()
+    #         for i, seq in enumerate(input_ids_list):
+    #             seq_ids = seq.tolist()
+    #             start = find_sublist_start(seq_ids, resp_ids)
+    #             labels[i, :start] = -100
 
-            # labels = input_ids, but mask prompt tokens with -100 (ignore index)
-            labels = input_ids.clone()
-            for i, seq in enumerate(input_ids_list):
-                seq_ids = seq.tolist()
-                start = find_sublist_start(seq_ids, resp_ids)
-                labels[i, :start] = -100
+    #         return {
+    #             "input_ids": input_ids,
+    #             "attention_mask": attention_mask,
+    #             "labels": labels,
+    #         }
 
-            return {
-                "input_ids": input_ids,
-                "attention_mask": attention_mask,
-                "labels": labels,
-            }
+    #     return collate_fn
+    def format_examples(examples):
+        return [
+            f"<|user|>\n{example['prompt']}\n<|assistant|>\n{example['response']}".strip()
+            for example in examples
+        ]
 
-        return collate_fn
+    collator = DataCollatorForCompletionOnlyLM(
+        tokenizer=tokenizer,
+        response_template="<|assistant|>\n",
+    )
 
-    eval_split = "validation" if "validation" in tokenized else "test"
+    eval_split = "validation" if "validation" in dataset else "test"
 
     trainer = SFTTrainer(
         model=model,
         args=training_args,
-        train_dataset=tokenized["train"],
-        eval_dataset=tokenized[eval_split],
-        data_collator=make_completion_collator(tokenizer),
+        train_dataset=dataset["train"],
+        eval_dataset=dataset[eval_split],
+        processing_class=tokenizer,
+        formatting_func=format_examples,
+        peft_config=lora_cfg,
+        data_collator=collator,
         callbacks=(
             [
                 VramPeakCallback(),
@@ -394,7 +388,9 @@ def main():
             good += supervised.sum().item()
 
         ratio = good / total if total else 0
-        print(f"[check] {good}/{total} samples had supervised tokens (ratio={ratio:.2f})")
+        print(
+            f"[check] {good}/{total} samples had supervised tokens (ratio={ratio:.2f})"
+        )
 
         assert ratio >= min_ok_ratio, (
             f"Too many empty/fully masked samples (only {ratio:.2%} good). "
@@ -411,13 +407,17 @@ def main():
 
     # Save PEFT model and tokenizer
     logger.info(f"Saving the model and tokenizer to {args.output_dir}")
-    trainer.model.save_pretrained(args.output_dir)
-    tokenizer.save_pretrained(args.output_dir)
+    trainer.save_model(args.output_dir)
 
     # Efficiency stats
     if torch.cuda.is_available():
         peak_gb = torch.cuda.max_memory_reserved() / (1024**3)
         logger.info("Peak reserved VRAM: {:.2f} GB", peak_gb)
+
+    # free the memory again
+    del model
+    del trainer
+    torch.cuda.empty_cache()
 
     logger.info("Training is done.")
 
