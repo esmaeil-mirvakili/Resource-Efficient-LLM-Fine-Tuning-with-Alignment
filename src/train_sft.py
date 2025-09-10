@@ -268,7 +268,6 @@ def main():
         gradient_checkpointing_kwargs=(
             {"use_reentrant": True} if args.grad_ckpt else None
         ),
-        max_seq_length=args.max_seq_len,
         weight_decay=args.weight_decay,
         learning_rate=args.learning_rate,
         num_train_epochs=args.num_train_epochs,
