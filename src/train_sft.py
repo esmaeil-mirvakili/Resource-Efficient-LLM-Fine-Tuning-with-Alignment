@@ -14,12 +14,11 @@ from transformers import (
     AutoTokenizer,
     BitsAndBytesConfig,
     TrainerCallback,
-    TrainingArguments,
     set_seed,
 )
 from peft import LoraConfig
 from datasets import load_dataset
-from trl import SFTTrainer, DataCollatorForCompletionOnlyLM
+from trl import SFTTrainer, SFTConfig
 from huggingface_hub import login
 
 
@@ -243,6 +242,16 @@ def main():
 
     dataset = dataset.filter(_has_nonempty_response)
 
+    def format_example(example):
+        return {
+            "messages": [
+                {"role": "user", "content": example["prompt"]},
+                {"role": "assistant", "content": example["response"]},
+            ]
+        }
+
+    dataset = dataset.map(format_example, remove_columns=dataset["train"].column_names)
+
     if "validation" not in dataset:
         dataset = dataset["train"].train_test_split(test_size=args.eval_ratio, seed=args.seed)
 
@@ -252,7 +261,7 @@ def main():
 
     # TrainingArguments
     use_bf16 = bf16_supported
-    training_args = TrainingArguments(
+    training_args = SFTConfig(
         output_dir=args.output_dir,
         per_device_train_batch_size=args.per_device_train_batch_size,
         per_device_eval_batch_size=args.per_device_eval_batch_size,
@@ -283,72 +292,7 @@ def main():
         max_grad_norm=1.0,
         load_best_model_at_end=True,
         metric_for_best_model="loss",
-    )
-
-    # def make_completion_collator(tokenizer, response_template="<|assistant|>\n"):
-    #     """
-    #     Data collator for SFT with causal LMs.
-
-    #     Pads a batch of examples and sets labels for all prompt tokens to -100
-    #     (ignore index), so the loss is computed only on the assistant’s response.
-    #     This prevents the model from wasting capacity predicting the prompt.
-    #     """
-    #     resp_ids = tokenizer.encode(response_template, add_special_tokens=False)
-
-    #     def find_sublist_start(seq_ids, pattern):
-    #         if not pattern:
-    #             return 0
-    #         # naive sublist search
-    #         for j in range(0, len(seq_ids) - len(pattern) + 1):
-    #             if seq_ids[j : j + len(pattern)] == pattern:
-    #                 return j + len(pattern)
-    #         return 0  # fallback if tag not found
-
-    #     def collate_fn(batch):
-    #         # tensors for input_ids
-    #         input_ids_list = [
-    #             torch.tensor(ex["input_ids"], dtype=torch.long) for ex in batch
-    #         ]
-
-    #         # attention masks: use provided if present, else all-ones
-    #         if "attention_mask" in batch[0]:
-    #             attn_list = [
-    #                 torch.tensor(ex["attention_mask"], dtype=torch.long) for ex in batch
-    #             ]
-    #         else:
-    #             attn_list = [
-    #                 torch.ones(len(ids), dtype=torch.long) for ids in input_ids_list
-    #             ]
-
-    #         # pad
-    #         input_ids = pad_sequence(
-    #             input_ids_list, batch_first=True, padding_value=tokenizer.pad_token_id
-    #         )
-    #         attention_mask = pad_sequence(attn_list, batch_first=True, padding_value=0)
-
-    #         # labels = input_ids, but mask prompt tokens with -100 (ignore index)
-    #         labels = input_ids.clone()
-    #         for i, seq in enumerate(input_ids_list):
-    #             seq_ids = seq.tolist()
-    #             start = find_sublist_start(seq_ids, resp_ids)
-    #             labels[i, :start] = -100
-
-    #         return {
-    #             "input_ids": input_ids,
-    #             "attention_mask": attention_mask,
-    #             "labels": labels,
-    #         }
-
-    #     return collate_fn
-    def format_examples(examples):
-        return [
-            f"<|user|>\n{example['prompt']}\n<|assistant|>\n{example['response']}".strip()
-            for example in examples
-        ]
-
-    collator = DataCollatorForCompletionOnlyLM(
-        tokenizer=tokenizer,
-        response_template="<|assistant|>\n",
+        assistant_only_loss=True,
     )
 
     eval_split = "validation" if "validation" in dataset else "test"
@@ -359,9 +303,7 @@ def main():
         train_dataset=dataset["train"],
         eval_dataset=dataset[eval_split],
         processing_class=tokenizer,
-        formatting_func=format_examples,
         peft_config=lora_cfg,
-        data_collator=collator,
         callbacks=(
             [
                 VramPeakCallback(),
