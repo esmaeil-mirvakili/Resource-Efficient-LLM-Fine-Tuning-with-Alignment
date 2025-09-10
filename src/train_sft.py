@@ -165,10 +165,9 @@ def in_distributed_mode() -> bool:
 def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
-    
+
     if args.dataloader_num_workers > 1:
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
-        
 
     init_hf_hub()
 
@@ -176,6 +175,7 @@ def main():
 
     if args.wandb_project:
         os.environ.setdefault("WANDB_PROJECT", args.wandb_project)
+        wandb.init(project=args.wandb_project, name=args.run_name, config=vars(args))
         wandb.define_metric("global_step")
         wandb.define_metric("*", step_metric="global_step")
 
@@ -265,7 +265,7 @@ def main():
 
     if "validation" not in dataset:
         dataset = dataset["train"].train_test_split(
-            test_size=args.eval_ratio, seed=args.seed
+            test_size=args.eval_ratio, seed=args.seed, shuffle=True
         )
 
     eval_split = "validation" if "validation" in dataset else "test"
@@ -283,7 +283,7 @@ def main():
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         gradient_checkpointing=args.grad_ckpt,
         gradient_checkpointing_kwargs=(
-            {"use_reentrant": True} if args.grad_ckpt else None
+            {"use_reentrant": False} if args.grad_ckpt else None
         ),
         max_length=args.max_seq_len,
         weight_decay=args.weight_decay,
@@ -298,6 +298,7 @@ def main():
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
         eval_strategy="steps",
+        logging_strategy="steps",
         eval_steps=args.eval_steps,
         do_eval=True,
         report_to=["wandb"] if args.wandb_project else [],
@@ -309,8 +310,9 @@ def main():
         max_grad_norm=1.0,
         load_best_model_at_end=True,
         metric_for_best_model="loss",
+        greater_is_better=False,
         completion_only_loss=True,
-        packing=False,
+        packing=True,
     )
 
     trainer = SFTTrainer(
@@ -366,6 +368,8 @@ def main():
     # Save PEFT model and tokenizer
     logger.info(f"Saving the model and tokenizer to {args.output_dir}")
     trainer.save_model(args.output_dir)
+    trainer.model.save_pretrained(args.output_dir)  # saves LoRA adapter
+    tokenizer.save_pretrained(args.output_dir)
 
     # Efficiency stats
     if torch.cuda.is_available():
