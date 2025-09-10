@@ -185,12 +185,6 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
 
-    tokenizer.clean_up_tokenization_spaces = False
-    if hasattr(tokenizer, "add_bos_token"):
-        tokenizer.add_bos_token = False
-    if hasattr(tokenizer, "add_eos_token"):
-        tokenizer.add_eos_token = False
-
     logger.info(f"Creating the model {args.model_name} with 4-bit quantization")
     bf16_supported = (
         torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 8
@@ -257,8 +251,8 @@ def main():
 
     def format_example(example):
         return {
-            "prompt": example["prompt"].rstrip("\n\r\t "),
-            "completion": example["response"].lstrip("\n\r "),
+            "prompt": example["prompt"],
+            "completion": example["response"],
         }
 
     dataset = dataset.map(format_example, remove_columns=dataset["train"].column_names)
