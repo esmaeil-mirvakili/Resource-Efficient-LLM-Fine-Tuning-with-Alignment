@@ -48,7 +48,7 @@ class EvalPerplexityCallback(TrainerCallback):
                 if metrics["eval_loss"] < 20
                 else float("inf")
             )
-            wandb.log({"eval/perplexity": ppl})
+            wandb.log({"eval/perplexity": ppl}, step=state.global_step)
 
 
 class TokensPerSecAndStepTimeCallback(TrainerCallback):
@@ -82,9 +82,10 @@ class TokensPerSecAndStepTimeCallback(TrainerCallback):
         )
         if steps > 0:
             step_time_ms = (dt / steps) * 1000.0
-            wandb.log({"train/step_time_ms": step_time_ms}, step=state.global_step)
-            wandb.log({"train/tokens_per_sec": toks / dt}, step=state.global_step)
-
+            wandb.log(
+                {"train/step_time_ms": step_time_ms, "train/tokens_per_sec": toks / dt},
+                step=state.global_step,
+            )
         self.last_t, self.last_step = now, state.global_step
 
 
@@ -164,6 +165,10 @@ def in_distributed_mode() -> bool:
 def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
+    
+    if args.dataloader_num_workers > 1:
+        os.environ["TOKENIZERS_PARALLELISM"] = "false"
+        
 
     init_hf_hub()
 
@@ -171,12 +176,20 @@ def main():
 
     if args.wandb_project:
         os.environ.setdefault("WANDB_PROJECT", args.wandb_project)
+        wandb.define_metric("global_step")
+        wandb.define_metric("*", step_metric="global_step")
 
     logger.info(f"Loading tokenizer for the base model: {args.model_name}")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
+
+    tokenizer.clean_up_tokenization_spaces = False
+    if hasattr(tokenizer, "add_bos_token"):
+        tokenizer.add_bos_token = False
+    if hasattr(tokenizer, "add_eos_token"):
+        tokenizer.add_eos_token = False
 
     logger.info(f"Creating the model {args.model_name} with 4-bit quantization")
     bf16_supported = (
@@ -244,14 +257,18 @@ def main():
 
     def format_example(example):
         return {
-            "prompt": example["prompt"],
-            "completion": example["response"],
+            "prompt": example["prompt"].rstrip("\n\r\t "),
+            "completion": example["response"].lstrip("\n\r "),
         }
 
     dataset = dataset.map(format_example, remove_columns=dataset["train"].column_names)
 
     if "validation" not in dataset:
-        dataset = dataset["train"].train_test_split(test_size=args.eval_ratio, seed=args.seed)
+        dataset = dataset["train"].train_test_split(
+            test_size=args.eval_ratio, seed=args.seed
+        )
+
+    eval_split = "validation" if "validation" in dataset else "test"
 
     logger.info(f"Train dataset size: {len(dataset['train'])}")
     if "validation" in dataset:
@@ -268,6 +285,7 @@ def main():
         gradient_checkpointing_kwargs=(
             {"use_reentrant": True} if args.grad_ckpt else None
         ),
+        max_length=args.max_seq_len,
         weight_decay=args.weight_decay,
         learning_rate=args.learning_rate,
         num_train_epochs=args.num_train_epochs,
@@ -292,9 +310,8 @@ def main():
         load_best_model_at_end=True,
         metric_for_best_model="loss",
         completion_only_loss=True,
+        packing=False,
     )
-
-    eval_split = "validation" if "validation" in dataset else "test"
 
     trainer = SFTTrainer(
         model=model,
