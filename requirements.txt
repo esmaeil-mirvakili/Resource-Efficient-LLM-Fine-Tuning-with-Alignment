@@ -7,4 +7,4 @@ peft>=0.11
 bitsandbytes>=0.43
 trl>=0.9
 huggingface_hub
-
+flash-attn==2.6.1
