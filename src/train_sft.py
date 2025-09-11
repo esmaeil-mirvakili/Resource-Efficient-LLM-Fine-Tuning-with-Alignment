@@ -263,6 +263,7 @@ def main():
         return isinstance(r, str) and len(r.strip()) > 0
 
     dataset = dataset.filter(_has_nonempty_response)
+    dataset = dataset.shuffle(seed=args.seed)
 
     def format_example(example) -> str:
         response = example.get("response", "")
