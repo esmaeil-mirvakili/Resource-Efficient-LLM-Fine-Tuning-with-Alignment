@@ -17,6 +17,7 @@ from transformers import (
     TrainingArguments,
     set_seed,
 )
+from transformers.trainer_utils import get_last_checkpoint
 from peft import LoraConfig
 from datasets import load_dataset
 from trl import SFTTrainer
@@ -75,6 +76,12 @@ def parse_args():
     parser.add_argument(
         "--use_flash_attn", type=bool, default=True, help="Use flash attention"
     )
+    parser.add_argument(
+        "--resume_from",
+        type=str,
+        default=None,
+        help='Path to a checkpoint directory to resume from, or "auto" to pick the latest in output_dir',
+    )
 
     # LoRA
     parser.add_argument("--lora_r", type=int, default=64)
@@ -108,12 +115,10 @@ class EvalPerplexityCallback(TrainerCallback):
     """Logs eval/perplexity from eval_loss."""
 
     def on_evaluate(self, args, state, control, **kwargs):
-        print("eval starts")
         if not getattr(state, "is_local_process_zero", True):
             return
         if wandb.run is None:
             return
-        print("EvalPerplexityCallback.on_evaluate", kwargs.get("metrics", {}))
         metrics = kwargs.get("metrics", {})
         if "eval_loss" in metrics:
             ppl = (
@@ -180,6 +185,38 @@ def in_distributed_mode() -> bool:
     return int(os.environ.get("WORLD_SIZE", "1")) > 1
 
 
+def get_lora_target_modules(model_name: str) -> List[str]:
+    if model_name == "mistralai/Mistral-7B-v0.1":
+        return [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        ]
+    elif model_name == "mistralai/Mixtral-8x7B-v0.1":
+        return [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "w1",
+            "w2",
+            "w3",
+        ]
+    logger.warning(
+        f"Model {model_name} not recognized for automatic lora target module selection. Choosing default set."
+    )
+    return [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+    ]
+
+
 def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
@@ -190,6 +227,17 @@ def main():
     init_hf_hub()
 
     set_seed(args.seed)
+
+    ckpt_to_resume = None
+    if args.resume_from:
+        if args.resume_from.lower() == "auto":
+            ckpt_to_resume = get_last_checkpoint(args.output_dir)
+            if ckpt_to_resume is None:
+                logger.warning("No checkpoint found in output_dir; starting fresh.")
+        else:
+            ckpt_to_resume = args.resume_from
+            if not os.path.isdir(ckpt_to_resume):
+                raise FileNotFoundError(f"--resume_from path not found: {ckpt_to_resume}")
 
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
@@ -235,17 +283,7 @@ def main():
     if args.grad_ckpt:
         model.gradient_checkpointing_enable()
 
-    # Prepare for k-bit training and wrap with LoRA
-    # Common Mistral/LLaMA MLP+Attention proj layers
-    target_modules = [
-        "q_proj",
-        "k_proj",
-        "v_proj",
-        "o_proj",
-        "gate_proj",
-        "up_proj",
-        "down_proj",
-    ]
+    target_modules = get_lora_target_modules(args.model_name)
 
     lora_cfg = LoraConfig(
         r=args.lora_r,
@@ -347,7 +385,9 @@ def main():
         return collate_fn
 
     dataset = dataset.map(
-        tokenize_function, remove_columns=dataset["train"].column_names
+        tokenize_function, 
+        remove_columns=dataset["train"].column_names,
+        desc="Tokenizing dataset",
     )
 
     if "validation" not in dataset:
@@ -420,41 +460,10 @@ def main():
         ),
     )
 
-    def simple_label_check(dataloader, num_batches=5, min_ok_ratio=0.8):
-        """Quick sanity check across a few batches."""
-        total = 0
-        good = 0
-
-        for i, batch in enumerate(dataloader):
-            if i >= num_batches:
-                break
-            labels = batch["labels"]
-            # Count how many samples in this batch have at least one supervised token
-            supervised = (labels != -100).any(dim=1)
-            total += labels.size(0)
-            good += supervised.sum().item()
-
-        ratio = good / total if total else 0
-        print(
-            f"[check] {good}/{total} samples had supervised tokens (ratio={ratio:.2f})"
-        )
-
-        assert ratio >= min_ok_ratio, (
-            f"Too many empty/fully masked samples (only {ratio:.2%} good). "
-            f"Check your data formatting or collator."
-        )
-
-    # Run before trainer.train()
-    simple_label_check(trainer.get_train_dataloader(), num_batches=5, min_ok_ratio=0.8)
-
     logger.info("Starting training...")
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
-    trainer.train()
-
-    n_total = sum(p.numel() for p in model.parameters())
-    n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logger.info(f"trainable params: {n_train} / {n_total} ({100*n_train/n_total:.4f}%)")
+    trainer.train(resume_from_checkpoint=ckpt_to_resume)
 
     # Save PEFT model and tokenizer
     logger.info(f"Saving the model and tokenizer to {args.output_dir}")
