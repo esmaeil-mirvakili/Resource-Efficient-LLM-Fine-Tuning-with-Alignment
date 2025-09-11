@@ -179,7 +179,7 @@ def main():
     init_hf_hub()
 
     set_seed(args.seed)
-    
+
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
@@ -247,10 +247,10 @@ def main():
         task_type="CAUSAL_LM",
     )
 
-    n_total = sum(p.numel() for p in model.parameters())
-    n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logger.info(f"trainable params: {n_train} / {n_total} ({100*n_train/n_total:.4f}%)")
-    assert n_train > 0, "No trainable parameters found!"
+    # n_total = sum(p.numel() for p in model.parameters())
+    # n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    # logger.info(f"trainable params: {n_train} / {n_total} ({100*n_train/n_total:.4f}%)")
+    # assert n_train > 0, "No trainable parameters found!"
 
     # Load dataset(s)
     data_files = {"train": args.train_file}
@@ -446,6 +446,10 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
     trainer.train()
+
+    n_total = sum(p.numel() for p in model.parameters())
+    n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info(f"trainable params: {n_train} / {n_total} ({100*n_train/n_total:.4f}%)")
 
     # Save PEFT model and tokenizer
     logger.info(f"Saving the model and tokenizer to {args.output_dir}")
