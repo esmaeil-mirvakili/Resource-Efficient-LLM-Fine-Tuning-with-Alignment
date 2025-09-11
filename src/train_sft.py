@@ -181,9 +181,7 @@ def main():
         wandb.define_metric("*", step_metric="global_step")
 
     logger.info(f"Loading tokenizer for the base model: {args.model_name}")
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model_name, use_fast=True
-    )
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
@@ -253,29 +251,10 @@ def main():
     dataset = dataset.filter(_has_nonempty_response)
 
     def format_instruction(sample):
-        if sample['context'] == '':
-            sample[
-                "text"
-            ] = f"""<s>[INST] <<SYS>>
-            Below is an instruction that describes a task. Write a response that appropriately completes the request.
-            <</SYS>>
-            
-            {sample['instruction']} [/INST]
-            {sample['response']}
-            """
-        else:
-            sample[
-                "text"
-            ] = f"""<s>[INST] <<SYS>>
-            Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
-            <</SYS>>
-            
-            {sample['instruction']}
-            ### Input:
-            {sample['context']} [/INST]
-            {sample['response']}
-            """
-        return sample
+        prompt = (sample.get("prompt") or "").strip()
+        resp = (sample.get("response") or "").strip()
+        text = f"<s>[INST] {prompt} [/INST]\n{resp}"
+        return {"text": text}
 
     dataset = dataset.map(
         format_instruction, remove_columns=dataset["train"].column_names
