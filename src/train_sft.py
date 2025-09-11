@@ -224,8 +224,6 @@ def main():
     if args.grad_ckpt:
         model.gradient_checkpointing_enable()
 
-    prepare_model_for_kbit_training(model)
-
     # Prepare for k-bit training and wrap with LoRA
     # Common Mistral/LLaMA MLP+Attention proj layers
     target_modules = [
@@ -246,11 +244,6 @@ def main():
         bias="none",
         task_type="CAUSAL_LM",
     )
-
-    # n_total = sum(p.numel() for p in model.parameters())
-    # n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    # logger.info(f"trainable params: {n_train} / {n_total} ({100*n_train/n_total:.4f}%)")
-    # assert n_train > 0, "No trainable parameters found!"
 
     # Load dataset(s)
     data_files = {"train": args.train_file}
