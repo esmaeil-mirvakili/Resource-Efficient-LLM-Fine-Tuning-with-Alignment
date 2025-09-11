@@ -4,7 +4,7 @@ import argparse
 import os
 import math
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List
 from loguru import logger
 import torch
 from torch.nn.utils.rnn import pad_sequence
@@ -17,77 +17,10 @@ from transformers import (
     TrainingArguments,
     set_seed,
 )
-from peft import LoraConfig, prepare_model_for_kbit_training
+from peft import LoraConfig
 from datasets import load_dataset
-from trl import SFTTrainer, SFTConfig
+from trl import SFTTrainer
 from huggingface_hub import login
-
-
-class VramPeakCallback(TrainerCallback):
-    def on_log(self, args, state, control, **kwargs):
-        if not getattr(state, "is_local_process_zero", True):
-            return
-        if torch.cuda.is_available() and wandb.run is not None:
-            peak_gb = torch.cuda.max_memory_reserved() / (1024**3)
-            wandb.log({"train/peak_vram_gb": peak_gb}, step=state.global_step)
-
-
-class EvalPerplexityCallback(TrainerCallback):
-    """Logs eval/perplexity from eval_loss."""
-
-    def on_evaluate(self, args, state, control, **kwargs):
-        print("eval starts")
-        if not getattr(state, "is_local_process_zero", True):
-            return
-        if wandb.run is None:
-            return
-        print("EvalPerplexityCallback.on_evaluate", kwargs.get("metrics", {}))
-        metrics = kwargs.get("metrics", {})
-        if "eval_loss" in metrics:
-            ppl = (
-                math.exp(metrics["eval_loss"])
-                if metrics["eval_loss"] < 20
-                else float("inf")
-            )
-            wandb.log({"eval/perplexity": ppl}, step=state.global_step)
-
-
-class TokensPerSecAndStepTimeCallback(TrainerCallback):
-    """Estimates and logs training tokens/sec at each logging step."""
-
-    def __init__(self, seq_len_estimate: int):
-        self.seq_len = seq_len_estimate
-        self.last_t = None
-        self.last_step = 0
-
-    def on_train_begin(self, args, state, control, **kwargs):
-        self.last_t = time.time()
-        self.last_step = 0
-
-    def on_log(self, args, state, control, **kwargs):
-        if not getattr(state, "is_local_process_zero", True):
-            return
-        if wandb.run is None:
-            return
-        now = time.time()
-        steps = state.global_step - self.last_step
-        dt = max(now - (self.last_t or now), 1e-9)
-
-        world = getattr(args, "world_size", 1)
-        toks = (
-            steps
-            * args.per_device_train_batch_size
-            * args.gradient_accumulation_steps
-            * world
-            * self.seq_len
-        )
-        if steps > 0:
-            step_time_ms = (dt / steps) * 1000.0
-            wandb.log(
-                {"train/step_time_ms": step_time_ms, "train/tokens_per_sec": toks / dt},
-                step=state.global_step,
-            )
-        self.last_t, self.last_step = now, state.global_step
 
 
 def parse_args():
@@ -134,7 +67,10 @@ def parse_args():
     )
     parser.add_argument("--dataloader_num_workers", type=int, default=2)
     parser.add_argument(
-        "--assistance_only_loss", type=bool, default=True, help="Use collator to mask prompt tokens in loss"
+        "--assistance_only_loss",
+        type=bool,
+        default=True,
+        help="Use collator to mask prompt tokens in loss",
     )
     parser.add_argument(
         "--use_flash_attn", type=bool, default=True, help="Use flash attention"
@@ -152,6 +88,81 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
 
     return parser.parse_args()
+
+
+class VramPeakCallback(TrainerCallback):
+    def on_log(self, args, state, control, **kwargs):
+        if not getattr(state, "is_local_process_zero", True):
+            return
+        if torch.cuda.is_available() and wandb.run is not None:
+            peak_gb = torch.cuda.max_memory_reserved() / (1024**3)
+            wandb.log(
+                {
+                    "train/peak_vram_gb": peak_gb,
+                    "global_step": state.global_step,
+                }
+            )
+
+
+class EvalPerplexityCallback(TrainerCallback):
+    """Logs eval/perplexity from eval_loss."""
+
+    def on_evaluate(self, args, state, control, **kwargs):
+        print("eval starts")
+        if not getattr(state, "is_local_process_zero", True):
+            return
+        if wandb.run is None:
+            return
+        print("EvalPerplexityCallback.on_evaluate", kwargs.get("metrics", {}))
+        metrics = kwargs.get("metrics", {})
+        if "eval_loss" in metrics:
+            ppl = (
+                math.exp(metrics["eval_loss"])
+                if metrics["eval_loss"] < 20
+                else float("inf")
+            )
+            wandb.log({"eval/perplexity": ppl, "global_step": state.global_step})
+
+
+class TokensPerSecAndStepTimeCallback(TrainerCallback):
+    """Estimates and logs training tokens/sec at each logging step."""
+
+    def __init__(self, seq_len_estimate: int):
+        self.seq_len = seq_len_estimate
+        self.last_t = None
+        self.last_step = 0
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        self.last_t = time.time()
+        self.last_step = 0
+
+    def on_log(self, args, state, control, **kwargs):
+        if not getattr(state, "is_local_process_zero", True):
+            return
+        if wandb.run is None:
+            return
+        now = time.time()
+        steps = state.global_step - self.last_step
+        dt = max(now - (self.last_t or now), 1e-9)
+
+        world = getattr(args, "world_size", 1)
+        toks = (
+            steps
+            * args.per_device_train_batch_size
+            * args.gradient_accumulation_steps
+            * world
+            * self.seq_len
+        )
+        if steps > 0:
+            step_time_ms = (dt / steps) * 1000.0
+            wandb.log(
+                {
+                    "train/step_time_ms": step_time_ms,
+                    "train/tokens_per_sec": toks / dt,
+                    "global_step": state.global_step,
+                },
+            )
+        self.last_t, self.last_step = now, state.global_step
 
 
 def init_hf_hub():
@@ -394,6 +405,7 @@ def main():
         train_dataset=dataset["train"],
         eval_dataset=dataset[eval_split],
         peft_config=lora_cfg,
+        processing_class=tokenizer,
         data_collator=(
             make_completion_collator(tokenizer) if args.assistance_only_loss else None
         ),
