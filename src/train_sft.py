@@ -19,7 +19,7 @@ from transformers import (
 )
 from peft import LoraConfig
 from datasets import load_dataset
-from trl import SFTTrainer
+from trl import SFTTrainer, SFTConfig
 from huggingface_hub import login
 
 
@@ -252,50 +252,33 @@ def main():
 
     dataset = dataset.filter(_has_nonempty_response)
 
-    def preprocess_function(example):
-        # 1) Build strings using your template
-        prompt = example["prompt"]
-        response = example["response"]
-
-        prompt_text = f"<|user|>\n{prompt}\n<|assistant|>\n"
-        resp_text = f"{response}"
-
-        # 2) Ensure EOS so the model learns to stop
-        if tokenizer.eos_token is not None and not resp_text.endswith(tokenizer.eos_token):
-            resp_text = resp_text + tokenizer.eos_token
-
-        # 3) Tokenize separately (no special tokens)
-        prompt_ids = tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
-        resp_ids   = tokenizer(resp_text,   add_special_tokens=False)["input_ids"]
-
-        # 4) Truncate to max_length, preferring to KEEP the response
-        max_length = args.max_seq_len
-        total_len = len(prompt_ids) + len(resp_ids)
-        if total_len > max_length:
-            overflow = total_len - max_length
-            if overflow <= len(prompt_ids):
-                # Drop from the LEFT of the prompt first
-                prompt_ids = prompt_ids[overflow:]
-            else:
-                # Prompt fully dropped; trim remaining overflow from the LEFT of the response
-                # (keep the tail so EOS is preserved)
-                rem = overflow - len(prompt_ids)
-                prompt_ids = []
-                resp_ids = resp_ids[rem:]
-
-        # 5) Concatenate and build labels/masks (mask prompt with -100)
-        input_ids = prompt_ids + resp_ids
-        attention_mask = [1] * len(input_ids)
-        labels = ([-100] * len(prompt_ids)) + resp_ids[:]
-
-        return {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "labels": labels,
-        }
+    def format_instruction(sample):
+        if sample['context'] == '':
+            sample[
+                "text"
+            ] = f"""<s>[INST] <<SYS>>
+            Below is an instruction that describes a task. Write a response that appropriately completes the request.
+            <</SYS>>
+            
+            {sample['instruction']} [/INST]
+            {sample['response']}
+            """
+        else:
+            sample[
+                "text"
+            ] = f"""<s>[INST] <<SYS>>
+            Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
+            <</SYS>>
+            
+            {sample['instruction']}
+            ### Input:
+            {sample['context']} [/INST]
+            {sample['response']}
+            """
+        return sample
 
     dataset = dataset.map(
-        preprocess_function, remove_columns=dataset["train"].column_names
+        format_instruction, remove_columns=dataset["train"].column_names
     )
 
     if "validation" not in dataset:
@@ -309,49 +292,9 @@ def main():
     if "validation" in dataset:
         logger.info(f"Validation dataset size: {len(dataset['validation'])}")
 
-    class CollatorKeepLabels:
-        """Pads input_ids/attention_mask/labels while preserving -100 on labels."""
-        def __init__(self, pad_id: int, label_pad_id: int = -100, right_pad: bool = True):
-            self.pad_id = pad_id
-            self.label_pad_id = label_pad_id
-            self.right_pad = right_pad
-
-        def __call__(self, features):
-            ids  = [torch.tensor(f["input_ids"], dtype=torch.long) for f in features]
-            attn = [torch.tensor(f["attention_mask"], dtype=torch.long) for f in features]
-            labs = [torch.tensor(f["labels"], dtype=torch.long) for f in features]
-
-            if self.right_pad:
-                # Standard HF style: right padding
-                batch_ids  = pad_sequence(ids,  batch_first=True, padding_value=self.pad_id)
-                batch_attn = pad_sequence(attn, batch_first=True, padding_value=0)
-                batch_labs = pad_sequence(labs, batch_first=True, padding_value=self.label_pad_id)
-            else:
-                # Left-padding: reverse, pad, reverse back
-                def left_pad(seq_list, pad_val):
-                    rev = [torch.flip(s, dims=[0]) for s in seq_list]
-                    padded = pad_sequence(rev, batch_first=True, padding_value=pad_val)
-                    return torch.flip(padded, dims=[1])
-
-                batch_ids  = left_pad(ids,  self.pad_id)
-                batch_attn = left_pad(attn, 0)
-                batch_labs = left_pad(labs, self.label_pad_id)
-
-            return {
-                "input_ids": batch_ids,
-                "attention_mask": batch_attn,
-                "labels": batch_labs,
-            }
-
-    data_collator = CollatorKeepLabels(
-        pad_id=tokenizer.pad_token_id,
-        label_pad_id=-100,
-        right_pad=True,  # set False if you really want left-padding
-    )
-
     # TrainingArguments
     use_bf16 = bf16_supported
-    training_args = TrainingArguments(
+    training_args = SFTConfig(
         output_dir=args.output_dir,
         per_device_train_batch_size=args.per_device_train_batch_size,
         per_device_eval_batch_size=args.per_device_eval_batch_size,
@@ -385,6 +328,9 @@ def main():
         load_best_model_at_end=True,
         metric_for_best_model="loss",
         greater_is_better=False,
+        max_length=args.max_seq_len,
+        dataset_text_field="text",
+        packing=True,
     )
 
     trainer = SFTTrainer(
@@ -392,7 +338,7 @@ def main():
         args=training_args,
         train_dataset=dataset["train"],
         eval_dataset=dataset[eval_split],
-        data_collator=data_collator,
+        processing_class=tokenizer,
         peft_config=lora_cfg,
         callbacks=(
             [
