@@ -17,7 +17,7 @@ from transformers import (
     TrainingArguments,
     set_seed,
 )
-from peft import LoraConfig
+from peft import LoraConfig, prepare_model_for_kbit_training
 from datasets import load_dataset
 from trl import SFTTrainer, SFTConfig
 from huggingface_hub import login
@@ -124,15 +124,21 @@ def parse_args():
         "--max_steps", type=int, default=-1, help="If >0, overrides epochs"
     )
     parser.add_argument(
-        "--grad_ckpt", type=bool, default=False, help="Use gradient checkpointing"
+        "--grad_ckpt", type=bool, default=True, help="Use gradient checkpointing"
     )
     parser.add_argument(
         "--ds_config", type=str, default=None, help="DeepSpeed config JSON file path"
     )
     parser.add_argument(
-        "--ddp_find_unused_parameters", type=bool, default=False, help="For DDP"
+        "--ddp_find_unused_parameters", type=bool, default=True, help="For DDP"
     )
     parser.add_argument("--dataloader_num_workers", type=int, default=2)
+    parser.add_argument(
+        "--assistance_only_loss", type=bool, default=True, help="Use collator to mask prompt tokens in loss"
+    )
+    parser.add_argument(
+        "--use_flash_attn", type=bool, default=True, help="Use flash attention"
+    )
 
     # LoRA
     parser.add_argument("--lora_r", type=int, default=64)
@@ -173,6 +179,9 @@ def main():
     init_hf_hub()
 
     set_seed(args.seed)
+    
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
     if args.wandb_project:
         os.environ.setdefault("WANDB_PROJECT", args.wandb_project)
@@ -202,15 +211,20 @@ def main():
         device_map=None if in_distributed_mode() else "auto",
         dtype=torch.bfloat16 if bf16_supported else torch.float16,
         trust_remote_code=True,
-        attn_implementation="flash_attention_2",
+        attn_implementation="flash_attention_2" if args.use_flash_attn else None,
     )
     # turn off KV cache for training
     model.config.use_cache = False
     # set model pad token id
     model.config.pad_token_id = tokenizer.pad_token_id
+    # keep existing BOS/EOS; typically bos=1, eos=2 for Mistral
+    if hasattr(model, "generation_config") and model.generation_config is not None:
+        model.generation_config.pad_token_id = tokenizer.pad_token_id
     # gradient checkpointing
     if args.grad_ckpt:
         model.gradient_checkpointing_enable()
+
+    prepare_model_for_kbit_training(model)
 
     # Prepare for k-bit training and wrap with LoRA
     # Common Mistral/LLaMA MLP+Attention proj layers
@@ -250,14 +264,85 @@ def main():
 
     dataset = dataset.filter(_has_nonempty_response)
 
-    def format_instruction(sample):
-        prompt = (sample.get("prompt") or "").strip()
-        resp = (sample.get("response") or "").strip()
-        text = f"<s>[INST] {prompt} [/INST]\n{resp}"
-        return {"text": text}
+    def format_example(example) -> str:
+        response = example.get("response", "")
+        prompt = example.get("prompt", "")
+        if response is None:
+            response = ""
+        return f"<|user|>\n{prompt}\n<|assistant|>\n{response}".strip()
+
+    def tokenize_function(ex: Dict[str, str]) -> Dict[str, List[int]]:
+        text = format_example(ex)
+        tokens = tokenizer(
+            text,
+            truncation=True,
+            max_length=args.max_seq_len,
+            padding=False,
+            return_attention_mask=True,
+        )
+        return {
+            "input_ids": tokens["input_ids"],
+            "attention_mask": tokens["attention_mask"],
+        }
+
+    def make_completion_collator(tokenizer, response_template="<|assistant|>\n"):
+        """
+        Data collator for SFT with causal LMs.
+
+        Pads a batch of examples and sets labels for all prompt tokens to -100
+        (ignore index), so the loss is computed only on the assistant’s response.
+        This prevents the model from wasting capacity predicting the prompt.
+        """
+        resp_ids = tokenizer.encode(response_template, add_special_tokens=False)
+
+        def find_sublist_start(seq_ids, pattern):
+            if not pattern:
+                return 0
+            # naive sublist search
+            for j in range(0, len(seq_ids) - len(pattern) + 1):
+                if seq_ids[j : j + len(pattern)] == pattern:
+                    return j + len(pattern)
+            return 0  # fallback if tag not found
+
+        def collate_fn(batch):
+            # tensors for input_ids
+            input_ids_list = [
+                torch.tensor(ex["input_ids"], dtype=torch.long) for ex in batch
+            ]
+
+            # attention masks: use provided if present, else all-ones
+            if "attention_mask" in batch[0]:
+                attn_list = [
+                    torch.tensor(ex["attention_mask"], dtype=torch.long) for ex in batch
+                ]
+            else:
+                attn_list = [
+                    torch.ones(len(ids), dtype=torch.long) for ids in input_ids_list
+                ]
+
+            # pad
+            input_ids = pad_sequence(
+                input_ids_list, batch_first=True, padding_value=tokenizer.pad_token_id
+            )
+            attention_mask = pad_sequence(attn_list, batch_first=True, padding_value=0)
+
+            # labels = input_ids, but mask prompt tokens with -100 (ignore index)
+            labels = input_ids.clone()
+            for i, seq in enumerate(input_ids_list):
+                seq_ids = seq.tolist()
+                start = find_sublist_start(seq_ids, resp_ids)
+                labels[i, :start] = -100
+
+            return {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "labels": labels,
+            }
+
+        return collate_fn
 
     dataset = dataset.map(
-        format_instruction, remove_columns=dataset["train"].column_names
+        tokenize_function, remove_columns=dataset["train"].column_names
     )
 
     if "validation" not in dataset:
@@ -273,7 +358,7 @@ def main():
 
     # TrainingArguments
     use_bf16 = bf16_supported
-    training_args = SFTConfig(
+    training_args = TrainingArguments(
         output_dir=args.output_dir,
         per_device_train_batch_size=args.per_device_train_batch_size,
         per_device_eval_batch_size=args.per_device_eval_batch_size,
@@ -307,9 +392,6 @@ def main():
         load_best_model_at_end=True,
         metric_for_best_model="loss",
         greater_is_better=False,
-        max_length=args.max_seq_len,
-        dataset_text_field="text",
-        packing=True,
     )
 
     trainer = SFTTrainer(
@@ -317,8 +399,10 @@ def main():
         args=training_args,
         train_dataset=dataset["train"],
         eval_dataset=dataset[eval_split],
-        processing_class=tokenizer,
         peft_config=lora_cfg,
+        data_collator=(
+            make_completion_collator(tokenizer) if args.assistance_only_loss else None
+        ),
         callbacks=(
             [
                 VramPeakCallback(),
