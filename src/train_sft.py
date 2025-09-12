@@ -41,7 +41,7 @@ def parse_args():
 
     parser.add_argument("--model_name", type=str, default="mistralai/Mistral-7B-v0.1")
     parser.add_argument("--output_dir", type=str, default="checkpoints/sft")
-    parser.add_argument("--hf_cache_path", type=str, default="/opt/ml/.cache/huggingface")
+    parser.add_argument("--hf_cache_path", type=str, default=None)
     parser.add_argument("--max_seq_len", type=int, default=2048)
     parser.add_argument("--learning_rate", type=float, default=2e-4)
     parser.add_argument("--num_train_epochs", type=float, default=1.0)
