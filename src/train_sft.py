@@ -41,13 +41,13 @@ def parse_args():
 
     parser.add_argument("--model_name", type=str, default="mistralai/Mistral-7B-v0.1")
     parser.add_argument("--output_dir", type=str, default="checkpoints/sft")
-
-    parser.add_argument("--max_seq_len", type=int, default=1024)
+    parser.add_argument("--hf_cache_path", type=str, default="/opt/ml/.cache/huggingface")
+    parser.add_argument("--max_seq_len", type=int, default=2048)
     parser.add_argument("--learning_rate", type=float, default=2e-4)
     parser.add_argument("--num_train_epochs", type=float, default=1.0)
-    parser.add_argument("--per_device_train_batch_size", type=int, default=2)
-    parser.add_argument("--per_device_eval_batch_size", type=int, default=2)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=32)
+    parser.add_argument("--per_device_train_batch_size", type=int, default=6)
+    parser.add_argument("--per_device_eval_batch_size", type=int, default=6)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
     parser.add_argument("--weight_decay", type=float, default=0.0)
     parser.add_argument("--warmup_ratio", type=float, default=0.05)
     parser.add_argument("--lr_scheduler_type", type=str, default="cosine")
@@ -249,7 +249,7 @@ def main():
         wandb.define_metric("*", step_metric="global_step")
 
     logger.info(f"Loading tokenizer for the base model: {args.model_name}")
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True, cache_dir=args.hf_cache_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
@@ -271,6 +271,7 @@ def main():
         dtype=torch.bfloat16 if bf16_supported else torch.float16,
         trust_remote_code=True,
         attn_implementation="flash_attention_2" if args.use_flash_attn else None,
+        cache_dir=args.hf_cache_path,
     )
     # turn off KV cache for training
     model.config.use_cache = False
