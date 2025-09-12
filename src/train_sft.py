@@ -171,34 +171,6 @@ class TokensPerSecAndStepTimeCallback(TrainerCallback):
         self.last_t, self.last_step = now, state.global_step
 
 
-class DiskSpaceCallback(TrainerCallback):
-    def __init__(self, path="/opt/ml"):
-        self.path = path
-        self._last_step = -1
-
-    def on_step_end(self, args, state, control, **kwargs):
-        # only log from rank 0
-        if not getattr(state, "is_local_process_zero", True):
-            return
-        if wandb.run is None:
-            return
-        if state.global_step == self._last_step:
-            return
-
-        total, used, free = shutil.disk_usage(self.path)
-        gb = 1024**3
-        wandb.log(
-            {
-                "system/disk_total_gb": total / gb,
-                "system/disk_used_gb": used / gb,
-                "system/disk_free_gb": free / gb,
-                "system/disk_used_pct": (used / total) * 100.0,
-                "global_step": state.global_step,
-            }
-        )
-        self._last_step = state.global_step
-
-
 def init_hf_hub():
     hf_token = os.getenv("HUGGINGFACE_HUB_TOKEN", None)
     if hf_token is None:
@@ -273,7 +245,14 @@ def main():
 
     if args.wandb_project:
         os.environ.setdefault("WANDB_PROJECT", args.wandb_project)
-        wandb.init(project=args.wandb_project, name=args.run_name, config=vars(args))
+        wandb.init(
+            project=args.wandb_project,
+            name=args.run_name,
+            config=vars(args),
+            settings=wandb.Settings(
+                x_stats_disk_paths=("/opt/ml",)  # log xstats to a writable path,
+            ),
+        )
         wandb.define_metric("global_step")
         wandb.define_metric("*", step_metric="global_step")
 
@@ -484,7 +463,6 @@ def main():
                 VramPeakCallback(),
                 EvalPerplexityCallback(),
                 TokensPerSecAndStepTimeCallback(seq_len_estimate=args.max_seq_len),
-                DiskSpaceCallback(path="/opt/ml"),
             ]
             if args.wandb_project
             else []
