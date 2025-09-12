@@ -16,6 +16,7 @@ from transformers import (
     BitsAndBytesConfig,
     TrainerCallback,
     TrainingArguments,
+    EarlyStoppingCallback,
     set_seed,
 )
 from transformers.trainer_utils import get_last_checkpoint
@@ -125,6 +126,38 @@ def parse_args():
 
     parser.add_argument("--seed", type=int, default=42)
 
+    # Eraly stopping
+    parser.add_argument(
+        "--early_stopping",
+        type=bool,
+        default=True,
+        help="Enable early stopping on eval metric (default eval_loss).",
+    )
+    parser.add_argument(
+        "--early_stopping_patience",
+        type=int,
+        default=3,
+        help="How many eval rounds with no improvement before stopping.",
+    )
+    parser.add_argument(
+        "--early_stopping_threshold",
+        type=float,
+        default=0.0,
+        help="Minimum improvement to qualify as better.",
+    )
+    parser.add_argument(
+        "--metric_for_best_model",
+        type=str,
+        default="eval_loss",
+        help="Metric name to monitor.",
+    )
+    parser.add_argument(
+        "--greater_is_better",
+        type=bool,
+        default=False,
+        help="Set if higher metric is better. For loss, leave False.",
+    )
+
     return parser.parse_args()
 
 
@@ -209,9 +242,7 @@ def init_hf_hub(args):
         )
         if args.push_to_hub:
             args.push_to_hub = False
-            logger.warning(
-                "Disabling push_to_hub to avoid errors."
-            )
+            logger.warning("Disabling push_to_hub to avoid errors.")
     else:
         login(token=hf_token)
         logger.info("Logged in to HuggingFace Hub.")
@@ -286,9 +317,6 @@ def main():
             project=args.wandb_project,
             name=args.run_name,
             config=vars(args),
-            settings=wandb.Settings(
-                x_stats_disk_paths=("/opt/ml",)  # log xstats to a writable path,
-            ),
         )
         wandb.define_metric("global_step")
         wandb.define_metric("*", step_metric="global_step")
@@ -491,6 +519,7 @@ def main():
         bf16=use_bf16,
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
+        save_strategy="steps",
         eval_strategy="steps",
         logging_strategy="steps",
         eval_steps=args.eval_steps,
@@ -503,8 +532,9 @@ def main():
         dataloader_num_workers=args.dataloader_num_workers,
         max_grad_norm=1.0,
         load_best_model_at_end=True,
-        metric_for_best_model="loss",
-        greater_is_better=False,
+        metric_for_best_model=args.metric_for_best_model,
+        greater_is_better=args.greater_is_better,
+        save_total_limit=3,
         # HF Hub args
         push_to_hub=args.push_to_hub,
         hub_model_id=args.hub_model_id,
@@ -532,6 +562,14 @@ def main():
             else []
         ),
     )
+
+    if args.early_stopping:
+        trainer.add_callback(
+            EarlyStoppingCallback(
+                early_stopping_patience=args.early_stopping_patience,
+                early_stopping_threshold=args.early_stopping_threshold,
+            )
+        )
 
     logger.info("Starting training...")
     if torch.cuda.is_available():
