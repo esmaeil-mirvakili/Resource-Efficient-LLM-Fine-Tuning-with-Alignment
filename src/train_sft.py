@@ -257,7 +257,12 @@ def main():
         wandb.define_metric("*", step_metric="global_step")
 
     logger.info(f"Loading tokenizer for the base model: {args.model_name}")
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True, cache_dir=args.hf_cache_path)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model_name,
+        use_fast=True,
+        cache_dir=args.hf_cache_path,
+        trust_remote_code=True,
+    )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
@@ -285,9 +290,20 @@ def main():
     model.config.use_cache = False
     # set model pad token id
     model.config.pad_token_id = tokenizer.pad_token_id
-    # keep existing BOS/EOS; typically bos=1, eos=2 for Mistral
-    if hasattr(model, "generation_config") and model.generation_config is not None:
-        model.generation_config.pad_token_id = tokenizer.pad_token_id
+        
+    def align_tokenizer_and_model(tokenizer, model):
+        to_set = {}
+        if tokenizer.pad_token_id is not None: to_set["pad_token_id"] = tokenizer.pad_token_id
+        if tokenizer.eos_token_id is not None: to_set["eos_token_id"] = tokenizer.eos_token_id
+        if tokenizer.bos_token_id is not None: to_set["bos_token_id"] = tokenizer.bos_token_id
+
+        for k, v in to_set.items():
+            setattr(model.config, k, v)
+            if hasattr(model, "generation_config") and model.generation_config is not None:
+                setattr(model.generation_config, k, v)
+
+    align_tokenizer_and_model(tokenizer, model)
+
     # gradient checkpointing
     if args.grad_ckpt:
         model.gradient_checkpointing_enable()
