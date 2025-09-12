@@ -84,6 +84,36 @@ def parse_args():
         help='Path to a checkpoint directory to resume from, or "auto" to pick the latest in output_dir',
     )
 
+    # Hugging Face Hub
+    parser.add_argument(
+        "--push_to_hub",
+        type=bool,
+        default=False,
+        help="If set, push artifacts to the Hub.",
+    )
+    parser.add_argument(
+        "--hub_model_id", type=str, default=None, help="Repo ID to push adapters to."
+    )
+    parser.add_argument(
+        "--hub_private_repo",
+        type=bool,
+        default=False,
+        help="Create/push to a private repo.",
+    )
+    parser.add_argument(
+        "--hub_strategy",
+        type=str,
+        default="end",
+        choices=["end", "every_save"],
+        help="When to push if push_to_hub=True.",
+    )
+    parser.add_argument(
+        "--save_safetensors",
+        type=bool,
+        default=True,
+        help="Save weights in safetensors format.",
+    )
+
     # LoRA
     parser.add_argument("--lora_r", type=int, default=64)
     parser.add_argument("--lora_alpha", type=int, default=32)
@@ -171,12 +201,17 @@ class TokensPerSecAndStepTimeCallback(TrainerCallback):
         self.last_t, self.last_step = now, state.global_step
 
 
-def init_hf_hub():
+def init_hf_hub(args):
     hf_token = os.getenv("HUGGINGFACE_HUB_TOKEN", None)
     if hf_token is None:
         logger.warning(
             "HuggingFace token not found in HUGGINGFACE_HUB_TOKEN env variable. Skipping login."
         )
+        if args.push_to_hub:
+            args.push_to_hub = False
+            logger.warning(
+                "Disabling push_to_hub to avoid errors."
+            )
     else:
         login(token=hf_token)
         logger.info("Logged in to HuggingFace Hub.")
@@ -225,7 +260,7 @@ def main():
     if args.dataloader_num_workers > 1:
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-    init_hf_hub()
+    init_hf_hub(args)
 
     set_seed(args.seed)
 
@@ -238,7 +273,9 @@ def main():
         else:
             ckpt_to_resume = args.resume_from
             if not os.path.isdir(ckpt_to_resume):
-                raise FileNotFoundError(f"--resume_from path not found: {ckpt_to_resume}")
+                raise FileNotFoundError(
+                    f"--resume_from path not found: {ckpt_to_resume}"
+                )
 
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
@@ -290,16 +327,22 @@ def main():
     model.config.use_cache = False
     # set model pad token id
     model.config.pad_token_id = tokenizer.pad_token_id
-        
+
     def align_tokenizer_and_model(tokenizer, model):
         to_set = {}
-        if tokenizer.pad_token_id is not None: to_set["pad_token_id"] = tokenizer.pad_token_id
-        if tokenizer.eos_token_id is not None: to_set["eos_token_id"] = tokenizer.eos_token_id
-        if tokenizer.bos_token_id is not None: to_set["bos_token_id"] = tokenizer.bos_token_id
+        if tokenizer.pad_token_id is not None:
+            to_set["pad_token_id"] = tokenizer.pad_token_id
+        if tokenizer.eos_token_id is not None:
+            to_set["eos_token_id"] = tokenizer.eos_token_id
+        if tokenizer.bos_token_id is not None:
+            to_set["bos_token_id"] = tokenizer.bos_token_id
 
         for k, v in to_set.items():
             setattr(model.config, k, v)
-            if hasattr(model, "generation_config") and model.generation_config is not None:
+            if (
+                hasattr(model, "generation_config")
+                and model.generation_config is not None
+            ):
                 setattr(model.generation_config, k, v)
 
     align_tokenizer_and_model(tokenizer, model)
@@ -410,7 +453,7 @@ def main():
         return collate_fn
 
     dataset = dataset.map(
-        tokenize_function, 
+        tokenize_function,
         remove_columns=dataset["train"].column_names,
         desc="Tokenizing dataset",
     )
@@ -462,6 +505,11 @@ def main():
         load_best_model_at_end=True,
         metric_for_best_model="loss",
         greater_is_better=False,
+        # HF Hub args
+        push_to_hub=args.push_to_hub,
+        hub_model_id=args.hub_model_id,
+        hub_strategy=args.hub_strategy,
+        hub_private_repo=args.hub_private_repo,
     )
 
     trainer = SFTTrainer(
