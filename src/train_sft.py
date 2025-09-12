@@ -42,8 +42,6 @@ def parse_args():
     )
 
     parser.add_argument("--model_name", type=str, default="mistralai/Mistral-7B-v0.1")
-    parser.add_argument("--output_dir", type=str, default="checkpoints/sft")
-    parser.add_argument("--hf_cache_path", type=str, default=None)
     parser.add_argument("--max_seq_len", type=int, default=2048)
     parser.add_argument("--learning_rate", type=float, default=2e-4)
     parser.add_argument("--num_train_epochs", type=float, default=1.0)
@@ -54,19 +52,12 @@ def parse_args():
     parser.add_argument("--warmup_ratio", type=float, default=0.05)
     parser.add_argument("--lr_scheduler_type", type=str, default="cosine")
     parser.add_argument("--logging_steps", type=int, default=10)
-    parser.add_argument("--save_steps", type=int, default=500)
     parser.add_argument("--eval_steps", type=int, default=200)
     parser.add_argument(
         "--max_steps", type=int, default=-1, help="If >0, overrides epochs"
     )
     parser.add_argument(
         "--grad_ckpt", type=bool, default=True, help="Use gradient checkpointing"
-    )
-    parser.add_argument(
-        "--ds_config", type=str, default=None, help="DeepSpeed config JSON file path"
-    )
-    parser.add_argument(
-        "--ddp_find_unused_parameters", type=bool, default=True, help="For DDP"
     )
     parser.add_argument("--dataloader_num_workers", type=int, default=2)
     parser.add_argument(
@@ -76,13 +67,46 @@ def parse_args():
         help="Use collator to mask prompt tokens in loss",
     )
     parser.add_argument(
-        "--use_flash_attn", type=bool, default=True, help="Use flash attention"
+        "--flash_attn",
+        type=str,
+        default="flash_attention_2",
+        help="Flash attention implementation to use (if available)",
     )
     parser.add_argument(
         "--resume_from",
         type=str,
         default=None,
         help='Path to a checkpoint directory to resume from, or "auto" to pick the latest in output_dir',
+    )
+
+    # Checkpointing
+    parser.add_argument("--save_steps", type=int, default=500)
+    parser.add_argument("--output_dir", type=str, default="checkpoints/sft")
+    parser.add_argument(
+        "--metric_for_best_model",
+        type=str,
+        default="eval_loss",
+        help="Metric name to monitor.",
+    )
+    parser.add_argument(
+        "--greater_is_better",
+        type=bool,
+        default=False,
+        help="Set if higher metric is better. For loss, leave False.",
+    )
+    parser.add_argument(
+        "--save_safetensors",
+        type=bool,
+        default=True,
+        help="Save weights in safetensors format.",
+    )
+
+    # Distributed training / DeepSpeed
+    parser.add_argument(
+        "--ds_config", type=str, default=None, help="DeepSpeed config JSON file path"
+    )
+    parser.add_argument(
+        "--ddp_find_unused_parameters", type=bool, default=True, help="For DDP"
     )
 
     # Hugging Face Hub
@@ -107,12 +131,6 @@ def parse_args():
         default="end",
         choices=["end", "every_save"],
         help="When to push if push_to_hub=True.",
-    )
-    parser.add_argument(
-        "--save_safetensors",
-        type=bool,
-        default=True,
-        help="Save weights in safetensors format.",
     )
 
     # LoRA
@@ -144,18 +162,6 @@ def parse_args():
         type=float,
         default=0.0,
         help="Minimum improvement to qualify as better.",
-    )
-    parser.add_argument(
-        "--metric_for_best_model",
-        type=str,
-        default="eval_loss",
-        help="Metric name to monitor.",
-    )
-    parser.add_argument(
-        "--greater_is_better",
-        type=bool,
-        default=False,
-        help="Set if higher metric is better. For loss, leave False.",
     )
 
     return parser.parse_args()
@@ -252,6 +258,15 @@ def in_distributed_mode() -> bool:
     return int(os.environ.get("WORLD_SIZE", "1")) > 1
 
 
+def flash_attn_available() -> str | None:
+    try:
+        import flash_attn
+        return True
+    except Exception:
+        logger.warning("flash-attn not available; falling back to default attention.")
+        return False
+
+
 def get_lora_target_modules(model_name: str) -> List[str]:
     if model_name == "mistralai/Mistral-7B-v0.1":
         return [
@@ -325,7 +340,6 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_name,
         use_fast=True,
-        cache_dir=args.hf_cache_path,
         trust_remote_code=True,
     )
     if tokenizer.pad_token is None:
@@ -348,8 +362,7 @@ def main():
         device_map=None if in_distributed_mode() else "auto",
         dtype=torch.bfloat16 if bf16_supported else torch.float16,
         trust_remote_code=True,
-        attn_implementation="flash_attention_2" if args.use_flash_attn else None,
-        cache_dir=args.hf_cache_path,
+        attn_implementation=args.flash_attn if flash_attn_available() else None,
     )
     # turn off KV cache for training
     model.config.use_cache = False
@@ -500,7 +513,6 @@ def main():
     # TrainingArguments
     use_bf16 = bf16_supported
     training_args = TrainingArguments(
-        output_dir=args.output_dir,
         per_device_train_batch_size=args.per_device_train_batch_size,
         per_device_eval_batch_size=args.per_device_eval_batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
@@ -518,8 +530,6 @@ def main():
         fp16=not use_bf16,
         bf16=use_bf16,
         logging_steps=args.logging_steps,
-        save_steps=args.save_steps,
-        save_strategy="steps",
         eval_strategy="steps",
         logging_strategy="steps",
         eval_steps=args.eval_steps,
@@ -527,14 +537,20 @@ def main():
         report_to=["wandb"] if args.wandb_project else [],
         run_name=args.run_name,
         seed=args.seed,
-        deepspeed=args.ds_config,
-        ddp_find_unused_parameters=args.ddp_find_unused_parameters,
         dataloader_num_workers=args.dataloader_num_workers,
         max_grad_norm=1.0,
+        # distributed training
+        deepspeed=args.ds_config,
+        ddp_find_unused_parameters=args.ddp_find_unused_parameters,
+        # checkpointing
+        output_dir=args.output_dir,
+        save_steps=args.save_steps,
+        save_strategy="steps",
         load_best_model_at_end=True,
         metric_for_best_model=args.metric_for_best_model,
         greater_is_better=args.greater_is_better,
         save_total_limit=3,
+        save_safetensors=args.save_safetensors,
         # HF Hub args
         push_to_hub=args.push_to_hub,
         hub_model_id=args.hub_model_id,
