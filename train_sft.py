@@ -425,7 +425,9 @@ def main(config=None):
     train(trainer, config.trainer)
 
     # Save PEFT model and tokenizer
-    logger.info(f"Saving the model and tokenizer to {config.trainer.output_dir}")
+    logger.info(
+        f"Saving the model and tokenizer to {config.trainer.training_arguments.output_dir}"
+    )
     trainer.save_model(config.trainer.training_arguments.output_dir)
     tokenizer.save_pretrained(config.trainer.training_arguments.output_dir)
 
