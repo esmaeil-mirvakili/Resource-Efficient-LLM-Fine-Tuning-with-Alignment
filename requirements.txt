@@ -9,3 +9,5 @@ trl>=0.9
 huggingface_hub
 flash-attn==2.6.1
 sentencepiece
+hydra-core>=1.3
+omegaconf>=2.3

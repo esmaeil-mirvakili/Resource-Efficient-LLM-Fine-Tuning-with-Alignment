@@ -1,0 +1,9 @@
+defaults:
+  - model: mistral_7b
+  - dataset: databricks_dolly_15k
+  - trainer: sft
+
+seed: 42
+wandb:
+  project: sft_training
+  run_name: sft-single-gpu
