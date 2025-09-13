@@ -25,6 +25,7 @@ from utils import (
     config_to_plain,
     hydra_arg_fix,
     align_tokenizer_and_model,
+    create_hf_ignore_file,
     VramPeakCallback,
 )
 
@@ -264,6 +265,9 @@ def prepare_trainer(
     eval_dataset,
     data_collator=None,
 ):
+    os.makedirs(trainer_config.training_arguments.output_dir, exist_ok=True)
+    if getattr(trainer_config.training_arguments, "push_to_hub", False):
+        create_hf_ignore_file(trainer_config.training_arguments.output_dir)
     # gradient checkpointing
     if getattr(trainer_config.training_arguments, "gradient_checkpointing", None):
         model.gradient_checkpointing_enable()

@@ -1,4 +1,5 @@
 import sys
+import os
 import torch
 from transformers import TrainerCallback
 import wandb
@@ -66,3 +67,11 @@ def hydra_arg_fix():
             hydra_formatted_args.append(a)
             i += 1
     sys.argv = hydra_formatted_args
+
+
+def create_hf_ignore_file(path):
+    with open(os.path.join(path, ".hfignore"), "w") as f:
+        f.write("*.sagemaker-uploading\n")
+        f.write("*.sagemaker-uploaded\n")
+        f.write("*.tmp\n")
+        f.write("*.lock\n")
