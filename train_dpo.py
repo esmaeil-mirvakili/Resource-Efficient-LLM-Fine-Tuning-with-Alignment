@@ -214,7 +214,7 @@ def prepare_model_tokenizer_dpo(model_config):
     align_tokenizer_and_model(tokenizer, policy)
 
     # Apply LoRA to POLICY only
-    lora_config = LoraConfig(config_to_plain(model_config.lora_config))
+    lora_config = LoraConfig(**config_to_plain(model_config.lora_config))
     policy = get_peft_model(policy, lora_config)
 
     # Reference model (frozen). Default to same checkpoint unless config provides ref_model_name.
