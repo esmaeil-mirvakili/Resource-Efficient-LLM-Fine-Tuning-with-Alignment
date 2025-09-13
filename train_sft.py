@@ -21,7 +21,12 @@ from datasets import load_dataset, Dataset
 from trl import SFTTrainer, SFTConfig
 from huggingface_hub import login
 import hydra
-from utils import hydra_arg_fix, align_tokenizer_and_model, VramPeakCallback
+from utils import (
+    config_to_plain,
+    hydra_arg_fix,
+    align_tokenizer_and_model,
+    VramPeakCallback,
+)
 
 
 class EvalPerplexityCallback(TrainerCallback):
@@ -195,7 +200,7 @@ def prepare_model_tokenizer(model_config):
             if getattr(model_config, "use_bf16", None) and is_bfloat16_supported()
             else torch.float16
         ),
-        **model_config.bnb_config,
+        **config_to_plain(model_config.bnb_config),
     )
     model = AutoModelForCausalLM.from_pretrained(
         model_config.model_name,
@@ -219,7 +224,7 @@ def prepare_model_tokenizer(model_config):
     align_tokenizer_and_model(tokenizer, model)
 
     lora_config = LoraConfig(
-        **model_config.lora_config,
+        **config_to_plain(model_config.lora_config),
     )
 
     return model, tokenizer, lora_config
@@ -264,7 +269,7 @@ def prepare_trainer(
         model.gradient_checkpointing_enable()
     # TrainingArguments
     training_args = SFTConfig(
-        **trainer_config.training_arguments,
+        **config_to_plain(trainer_config.training_arguments),
     )
 
     trainer = SFTTrainer(

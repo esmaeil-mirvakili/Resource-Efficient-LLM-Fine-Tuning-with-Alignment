@@ -2,6 +2,11 @@ import sys
 import torch
 from transformers import TrainerCallback
 import wandb
+from omegaconf import OmegaConf
+
+
+def config_to_plain(cfg):
+    return OmegaConf.to_container(cfg, resolve=True)
 
 
 class VramPeakCallback(TrainerCallback):
