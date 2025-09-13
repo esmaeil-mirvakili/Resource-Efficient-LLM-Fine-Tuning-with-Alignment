@@ -166,7 +166,7 @@ def prepare_dataset(dataset_config, example_template, seed):
 
     dataset = dataset.map(
         format_example,
-        remove_columns=dataset.column_names,
+        remove_columns=dataset.column_names["train"],
     )
 
     if "validation" not in dataset:
