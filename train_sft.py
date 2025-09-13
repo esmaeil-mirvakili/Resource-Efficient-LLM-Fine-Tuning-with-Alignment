@@ -154,7 +154,7 @@ def prepare_dataset(dataset_config, example_template, seed):
     if getattr(dataset_config, "shuffle", None):
         dataset = dataset.shuffle(seed=seed)
 
-    if getattr(dataset_config, "limit", None):
+    if getattr(dataset_config, "limit", -1) > 0:
         limit = dataset_config.limit
         if "train" in dataset:
             dataset["train"] = dataset["train"].select(
