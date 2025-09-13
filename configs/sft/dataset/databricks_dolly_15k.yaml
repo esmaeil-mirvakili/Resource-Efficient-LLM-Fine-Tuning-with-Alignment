@@ -1,0 +1,13 @@
+
+dataset_name: databricks/databricks-dolly-15k
+dataset_output_path: ./data/databricks_dolly_15k
+splits:
+  - train
+limit: -1
+shuffle: true
+eval_ratio: 0.05
+deduplicate: prompt
+column_map:
+  prompt: instruction
+  response: response
+data_text_field: prompt

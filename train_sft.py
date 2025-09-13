@@ -315,7 +315,7 @@ def train(trainer, trainer_config):
     trainer.train(resume_from_checkpoint=ckpt_to_resume)
 
 
-@hydra.main(version_base="1.3", config_path="../configs/sft", config_name="sft_config")
+@hydra.main(version_base="1.3", config_path="configs/sft", config_name="sft_config")
 def main(config=None):
     init_hf_hub()
     seed = config.get("seed", 42)
@@ -325,7 +325,7 @@ def main(config=None):
     torch.backends.cudnn.allow_tf32 = True
 
     if getattr(config, "wandb", None):
-        os.environ.setdefault("WANDB_PROJECT", config.wandb_project)
+        os.environ.setdefault("WANDB_PROJECT", config.wandb.project)
         wandb.init(
             project=config.wandb.project,
             name=config.wandb.run_name,
