@@ -1,5 +1,4 @@
 import sys
-import os
 import torch
 from transformers import TrainerCallback
 import wandb
