@@ -1,4 +1,6 @@
 import sys
+import shutil
+import os
 import torch
 from transformers import TrainerCallback
 import wandb
@@ -69,8 +71,4 @@ def hydra_arg_fix():
 
 
 def create_hf_gitignore_file(path):
-    with open(os.path.join(path, ".gitignore"), "w") as f:
-        f.write("*.sagemaker-uploading\n")
-        f.write("*.sagemaker-uploaded\n")
-        f.write("*.tmp\n")
-        f.write("*.lock\n")
+    shutil.copyfile("hf_gitignore", os.path.join(path, ".gitignore"))
