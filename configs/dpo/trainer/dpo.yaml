@@ -9,7 +9,7 @@ training_arguments:
   label_smoothing: 0.0
   max_prompt_length: 512
   max_length: 2048
-  precompute_ref_log_probs: true
+  precompute_ref_log_probs: false
   # batch
   per_device_train_batch_size: 6
   per_device_eval_batch_size: 6
