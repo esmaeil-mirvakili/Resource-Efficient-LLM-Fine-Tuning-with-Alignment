@@ -5,5 +5,5 @@ defaults:
 
 seed: 42
 wandb:
-  project: sft_training
+  project: resource_efficient_sft_dpo
   run_name: sft-single-gpu

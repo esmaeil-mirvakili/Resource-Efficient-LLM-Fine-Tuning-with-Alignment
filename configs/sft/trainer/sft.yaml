@@ -36,7 +36,7 @@ training_arguments:
   deepspeed: null
   ddp_find_unused_parameters: false
   # saving
-  output_dir: ./outputs/sft-single-gpu
+  output_dir: ./outputs/sft_checkpoint
   save_strategy: steps
   save_steps: 200
   save_total_limit: 3

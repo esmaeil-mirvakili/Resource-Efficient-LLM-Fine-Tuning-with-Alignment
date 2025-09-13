@@ -3,7 +3,6 @@
 import os
 import math
 import json
-import sys
 from loguru import logger
 import torch
 from torch.nn.utils.rnn import pad_sequence
@@ -13,30 +12,16 @@ from transformers import (
     AutoTokenizer,
     BitsAndBytesConfig,
     TrainerCallback,
-    TrainingArguments,
     EarlyStoppingCallback,
     set_seed,
 )
 from transformers.trainer_utils import get_last_checkpoint
 from peft import LoraConfig
 from datasets import load_dataset, Dataset
-from trl import SFTTrainer
+from trl import SFTTrainer, SFTConfig
 from huggingface_hub import login
 import hydra
-
-
-class VramPeakCallback(TrainerCallback):
-    def on_log(self, args, state, control, **kwargs):
-        if not getattr(state, "is_local_process_zero", True):
-            return
-        if torch.cuda.is_available() and wandb.run is not None:
-            peak_gb = torch.cuda.max_memory_reserved() / (1024**3)
-            wandb.log(
-                {
-                    "train/peak_vram_gb": peak_gb,
-                    "global_step": state.global_step,
-                }
-            )
+from utils import hydra_arg_fix, align_tokenizer_and_model, VramPeakCallback
 
 
 class EvalPerplexityCallback(TrainerCallback):
@@ -139,14 +124,14 @@ def preprocess_dataset(dataset_config):
             {k: list(normalized[k]) for k in normalized.features}
         )
 
-        if dataset_config.deduplicate:
+        if getattr(dataset_config, "deduplicate", None):
             # Deduplicate by prompt
             before = len(normalized)
             seen = set()
             keep_idx = []
-            for i, p in enumerate(normalized[dataset_config.deduplicate]):
-                if p not in seen:
-                    seen.add(p)
+            for i, v in enumerate(normalized[dataset_config.deduplicate]):
+                if v not in seen:
+                    seen.add(v)
                     keep_idx.append(i)
             normalized = normalized.select(keep_idx)
             logger.info("Dropped {} duplicate prompts", before - len(normalized))
@@ -163,13 +148,18 @@ def preprocess_dataset(dataset_config):
 def prepare_dataset(dataset_config, example_template):
     data_files = preprocess_dataset(dataset_config)
 
-    # Load dataset(s)
+    # Load dataset
     dataset = load_dataset("json", data_files=data_files)
 
-    if dataset_config.shuffle:
+    if getattr(dataset_config, "shuffle", None):
         dataset = dataset.shuffle(seed=dataset_config.seed)
-    if dataset_config.limit:
-        dataset = dataset.select(range(min(dataset_config.limit, len(dataset))))
+
+    if getattr(dataset_config, "limit", None):
+        limit = dataset_config.limit
+        if "train" in dataset:
+            dataset["train"] = dataset["train"].select(
+                range(min(limit, len(dataset["train"])))
+            )
 
     def format_example(example) -> str:
         return {dataset_config.data_text_field: example_template.format(**example)}
@@ -188,13 +178,11 @@ def prepare_dataset(dataset_config, example_template):
 
 
 def prepare_model_tokenizer(model_config):
-    os.makedirs(model_config.training_arguments.output_dir, exist_ok=True)
-
     logger.info(f"Loading tokenizer for the base model: {model_config.model_name}")
     tokenizer = AutoTokenizer.from_pretrained(
         model_config.model_name,
         use_fast=model_config.tokenizer.use_fast,
-        trust_remote_code=model_config.tokenizer.trust_remote_code,
+        trust_remote_code=getattr(model_config.tokenizer, "trust_remote_code", False),
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -204,7 +192,7 @@ def prepare_model_tokenizer(model_config):
     bnb_config = BitsAndBytesConfig(
         bnb_4bit_compute_dtype=(
             torch.bfloat16
-            if model_config.use_bf16 and is_bfloat16_supported()
+            if getattr(model_config, "use_bf16", None) and is_bfloat16_supported()
             else torch.float16
         ),
         **model_config.bnb_config,
@@ -215,35 +203,18 @@ def prepare_model_tokenizer(model_config):
         device_map=None if in_distributed_mode() else "auto",
         dtype=(
             torch.bfloat16
-            if model_config.use_bf16 and is_bfloat16_supported()
+            if getattr(model_config, "use_bf16", None) and is_bfloat16_supported()
             else torch.float16
         ),
-        trust_remote_code=model_config.model.trust_remote_code,
+        trust_remote_code=getattr(model_config.model, "trust_remote_code", False),
         attn_implementation=(
-            model_config.model.attn_implementation if flash_attn_available() else None
+            getattr(model_config.model, "attn_implementation", None)
+            if flash_attn_available()
+            else None
         ),
     )
-    # turn off KV cache for training
     model.config.use_cache = False
-    # set model pad token id
     model.config.pad_token_id = tokenizer.pad_token_id
-
-    def align_tokenizer_and_model(tokenizer, model):
-        to_set = {}
-        if tokenizer.pad_token_id is not None:
-            to_set["pad_token_id"] = tokenizer.pad_token_id
-        if tokenizer.eos_token_id is not None:
-            to_set["eos_token_id"] = tokenizer.eos_token_id
-        if tokenizer.bos_token_id is not None:
-            to_set["bos_token_id"] = tokenizer.bos_token_id
-
-        for k, v in to_set.items():
-            setattr(model.config, k, v)
-            if (
-                hasattr(model, "generation_config")
-                and model.generation_config is not None
-            ):
-                setattr(model.generation_config, k, v)
 
     align_tokenizer_and_model(tokenizer, model)
 
@@ -289,10 +260,10 @@ def prepare_trainer(
     data_collator=None,
 ):
     # gradient checkpointing
-    if trainer_config.training_arguments.gradient_checkpointing:
+    if getattr(trainer_config.training_arguments, "gradient_checkpointing", None):
         model.gradient_checkpointing_enable()
     # TrainingArguments
-    training_args = TrainingArguments(
+    training_args = SFTConfig(
         **trainer_config.training_arguments,
     )
 
@@ -312,7 +283,7 @@ def prepare_trainer(
         ),
     )
 
-    if trainer_config.early_stopping:
+    if getattr(trainer_config, "early_stopping", None):
         trainer.add_callback(
             EarlyStoppingCallback(
                 early_stopping_patience=trainer_config.early_stopping.early_stopping_patience,
@@ -325,8 +296,8 @@ def prepare_trainer(
 
 def train(trainer, trainer_config):
     ckpt_to_resume = None
-    if trainer_config.resume_from:
-        if trainer_config.resume_from.lower() == "auto":
+    if getattr(trainer_config, "resume_from", None):
+        if getattr(trainer_config, "resume_from", "").lower() == "auto":
             ckpt_to_resume = get_last_checkpoint(
                 trainer_config.training_arguments.output_dir
             )
@@ -344,16 +315,15 @@ def train(trainer, trainer_config):
     trainer.train(resume_from_checkpoint=ckpt_to_resume)
 
 
-@hydra.main(version_base="1.3", config_path="../configs", config_name="config")
+@hydra.main(version_base="1.3", config_path="../configs/sft", config_name="sft_config")
 def main(config=None):
     init_hf_hub()
-
     set_seed(config.seed)
 
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-    if config.wandb:
+    if getattr(config, "wandb", None):
         os.environ.setdefault("WANDB_PROJECT", config.wandb_project)
         wandb.init(
             project=config.wandb.project,
@@ -441,7 +411,7 @@ def main(config=None):
         dataset[eval_split],
         data_collator=(
             make_completion_collator(tokenizer, config.model.completion_template)
-            if config.model.completion_only_loss
+            if getattr(config.model, "completion_only_loss", None)
             else None
         ),
     )
@@ -464,36 +434,6 @@ def main(config=None):
     torch.cuda.empty_cache()
 
     logger.info("Training is done.")
-
-
-def hydra_arg_fix():
-    if len(sys.argv) <= 1:
-        return
-    hydra_formatted_args = [sys.argv[0]]
-    i = 1
-    while i < len(sys.argv):
-        a = sys.argv[i]
-        if a.startswith("--"):
-            # support --key=value
-            if "=" in a:
-                k, v = a[2:].split("=", 1)
-                hydra_formatted_args.append(f"{k}={v}")
-                i += 1
-            else:
-                # support --key value   (value might be missing)
-                k = a[2:]
-                if i + 1 < len(sys.argv) and not sys.argv[i + 1].startswith("--"):
-                    v = sys.argv[i + 1]
-                    hydra_formatted_args.append(f"{k}={v}")
-                    i += 2
-                else:
-                    # bare flag => true
-                    hydra_formatted_args.append(f"{k}=true")
-                    i += 1
-        else:
-            hydra_formatted_args.append(a)
-            i += 1
-    sys.argv = hydra_formatted_args
 
 
 if __name__ == "__main__":
