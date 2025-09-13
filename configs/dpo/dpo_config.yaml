@@ -1,10 +1,10 @@
 defaults:
   - model: mistral_7b
-  - dataset: databricks_dolly_15k
-  - trainer: sft
+  - dataset: anthropic_hh_rlhf
+  - trainer: dpo
   - _self_
 
 seed: 42
 wandb:
   project: resource_efficient_sft_dpo
-  run_name: sft-single-gpu
+  run_name: dpo-single-gpu

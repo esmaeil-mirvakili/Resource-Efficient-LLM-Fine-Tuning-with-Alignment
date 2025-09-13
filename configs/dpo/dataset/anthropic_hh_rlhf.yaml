@@ -1,0 +1,12 @@
+
+dataset_name: Anthropic/hh-rlhf
+dataset_output_path: ./data/anthropic_hh_rlhf
+splits:
+  - train
+limit: -1
+shuffle: true
+eval_ratio: 0.05
+deduplicate: prompt
+column_map:
+  chosen: chosen
+  rejected: rejected
