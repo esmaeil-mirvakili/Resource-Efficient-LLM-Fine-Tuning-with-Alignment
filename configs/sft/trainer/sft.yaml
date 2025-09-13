@@ -30,8 +30,7 @@ training_arguments:
   # logging
   logging_steps: 10
   logging_strategy: steps
-  report_to:
-    - wandb
+  report_to: wandb
   # deepspeed
   deepspeed: null
   ddp_find_unused_parameters: false
