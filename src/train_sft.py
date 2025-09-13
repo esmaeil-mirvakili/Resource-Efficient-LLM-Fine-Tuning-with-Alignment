@@ -145,14 +145,14 @@ def preprocess_dataset(dataset_config):
     return dataset_paths
 
 
-def prepare_dataset(dataset_config, example_template):
+def prepare_dataset(dataset_config, example_template, seed):
     data_files = preprocess_dataset(dataset_config)
 
     # Load dataset
     dataset = load_dataset("json", data_files=data_files)
 
     if getattr(dataset_config, "shuffle", None):
-        dataset = dataset.shuffle(seed=dataset_config.seed)
+        dataset = dataset.shuffle(seed=seed)
 
     if getattr(dataset_config, "limit", None):
         limit = dataset_config.limit
@@ -171,7 +171,7 @@ def prepare_dataset(dataset_config, example_template):
 
     if "validation" not in dataset:
         dataset = dataset["train"].train_test_split(
-            test_size=dataset_config.eval_ratio, seed=dataset_config.seed, shuffle=True
+            test_size=dataset_config.eval_ratio, seed=seed, shuffle=True
         )
 
     return dataset
@@ -318,7 +318,8 @@ def train(trainer, trainer_config):
 @hydra.main(version_base="1.3", config_path="../configs/sft", config_name="sft_config")
 def main(config=None):
     init_hf_hub()
-    set_seed(config.seed)
+    seed = config.get("seed", 42)
+    set_seed(seed)
 
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
@@ -334,7 +335,7 @@ def main(config=None):
 
     model, tokenizer, lora_config = prepare_model_tokenizer(config.model)
 
-    dataset = prepare_dataset(config.dataset, config.model.example_template)
+    dataset = prepare_dataset(config.dataset, config.model.example_template, seed)
 
     eval_split = "validation" if "validation" in dataset else "test"
 
