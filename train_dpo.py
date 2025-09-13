@@ -2,10 +2,11 @@ import os
 import json
 from datasets import load_dataset, Dataset
 from loguru import logger
-from .utils import (
+from utils import (
     config_to_plain,
     hydra_arg_fix,
     align_tokenizer_and_model,
+    create_hf_gitignore_file,
     VramPeakCallback,
 )
 import torch
@@ -77,7 +78,7 @@ def preprocess_dataset(dataset_config):
 
         cols = set(dataset.column_names)
         column_map = dataset_config.column_map or {}
-        required_keys = {"prompt", "chosen", "rejected"}
+        required_keys = {"chosen", "rejected"}
 
         if not required_keys.issubset(column_map.keys()):
             raise ValueError(
@@ -90,10 +91,10 @@ def preprocess_dataset(dataset_config):
             )
         logger.info(f"Using columns: {column_map}")
 
-        # Normalize + filter to canonical keys: prompt/chosen/rejected
+        # Normalize and filter
         def normalize_record(record):
             normalized_record = {}
-            for col in ["prompt", "chosen", "rejected"]:
+            for col in required_keys:
                 value = record.get(column_map[col], None)
                 if value is None:
                     return None
@@ -117,15 +118,13 @@ def preprocess_dataset(dataset_config):
         normalized = normalized.filter(lambda r: r is not None)
 
         # Convert to a clean Dataset
-        normalized = Dataset.from_dict(
-            {k: list(normalized[k]) for k in ["prompt", "chosen", "rejected"]}
-        )
+        normalized = Dataset.from_dict({k: list(normalized[k]) for k in required_keys})
 
         if getattr(dataset_config, "deduplicate", None):
             key = dataset_config.deduplicate
             if key not in {"chosen", "rejected"}:
                 raise ValueError(
-                    f"deduplicate must be one of prompt/chosen/rejected, got {key}"
+                    f"deduplicate must be one of chosen/rejected, got {key}"
                 )
             before = len(normalized)
             seen = set()
@@ -254,6 +253,9 @@ def prepare_trainer_dpo(
     train_dataset,
     eval_dataset,
 ):
+    os.makedirs(trainer_config.training_arguments.output_dir, exist_ok=True)
+    if getattr(trainer_config.training_arguments, "push_to_hub", False):
+        create_hf_gitignore_file(trainer_config.training_arguments.output_dir)
     # gradient checkpointing
     if getattr(trainer_config.training_arguments, "gradient_checkpointing", None):
         policy_model.gradient_checkpointing_enable()

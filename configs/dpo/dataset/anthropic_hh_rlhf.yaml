@@ -6,7 +6,7 @@ splits:
 limit: -1
 shuffle: true
 eval_ratio: 0.05
-deduplicate: prompt
+deduplicate: null
 column_map:
   chosen: chosen
   rejected: rejected
