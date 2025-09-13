@@ -210,3 +210,5 @@ __marimo__/
 
 # project specific ignores
 data/
+outputs/
+wandb/
