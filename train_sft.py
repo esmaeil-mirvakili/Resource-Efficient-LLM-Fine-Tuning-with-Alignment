@@ -275,14 +275,6 @@ def prepare_trainer(
         and is_main_process()
     ):
         create_hf_gitignore_file(trainer_config.training_arguments.output_dir)
-    # if in_distributed_mode() and getattr(
-    #     trainer_config.training_arguments, "deepspeed", None
-    # ):
-    #     setattr(
-    #         trainer_config.training_arguments,
-    #         "load_best_model_at_end",
-    #         False,
-        # )
     # gradient checkpointing
     if getattr(trainer_config.training_arguments, "gradient_checkpointing", None):
         model.gradient_checkpointing_enable()
@@ -341,8 +333,7 @@ def train(trainer, trainer_config):
 
 @hydra.main(version_base="1.3", config_path="configs/sft", config_name="sft_config")
 def main(config=None):
-    if is_main_process():
-        init_hf_hub()
+    init_hf_hub()
     seed = config.get("seed", 42)
     set_seed(seed)
 
@@ -357,6 +348,15 @@ def main(config=None):
         )
         wandb.define_metric("global_step")
         wandb.define_metric("*", step_metric="global_step")
+
+    if in_distributed_mode() and getattr(
+        config.model.bnb_config, "load_in_8bit", False
+    ):
+        setattr(
+            config.trainer.training_arguments,
+            "load_best_model_at_end",
+            False,
+        )
 
     model, tokenizer, lora_config = prepare_model_tokenizer(config.model)
 
