@@ -27,6 +27,10 @@ from huggingface_hub import login
 import hydra
 
 
+def is_main_process() -> bool:
+    return int(os.environ.get("RANK", "0")) == 0
+
+
 def init_hf_hub():
     hf_token = os.getenv("HUGGINGFACE_HUB_TOKEN", None)
     if hf_token is None:
@@ -254,8 +258,19 @@ def prepare_trainer_dpo(
     eval_dataset,
 ):
     os.makedirs(trainer_config.training_arguments.output_dir, exist_ok=True)
-    if getattr(trainer_config.training_arguments, "push_to_hub", False):
+    if (
+        getattr(trainer_config.training_arguments, "push_to_hub", False)
+        and is_main_process()
+    ):
         create_hf_gitignore_file(trainer_config.training_arguments.output_dir)
+    if in_distributed_mode() and getattr(
+        trainer_config.training_arguments, "deepspeed", None
+    ):
+        setattr(
+            trainer_config.training_arguments,
+            "load_best_model_at_end",
+            False,
+        )
     # gradient checkpointing
     if getattr(trainer_config.training_arguments, "gradient_checkpointing", None):
         policy_model.gradient_checkpointing_enable()
@@ -310,14 +325,15 @@ def train(trainer, trainer_config):
 
 @hydra.main(version_base="1.3", config_path="configs/dpo", config_name="dpo_config")
 def main(config=None):
-    init_hf_hub()
+    if is_main_process():
+        init_hf_hub()
     seed = config.get("seed", 42)
     set_seed(seed)
 
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-    if getattr(config, "wandb", None):
+    if getattr(config, "wandb", None) and is_main_process():
         os.environ.setdefault("WANDB_PROJECT", config.wandb.project)
         wandb.init(project=config.wandb.project, name=config.wandb.run_name)
         wandb.define_metric("global_step")
@@ -343,10 +359,15 @@ def main(config=None):
 
     train(trainer, config.trainer)
 
-    outdir = config.trainer.training_arguments.output_dir
-    logger.info(f"Saving the policy (LoRA) and tokenizer to {outdir}")
-    trainer.save_model(outdir)
-    tokenizer.save_pretrained(outdir)
+    trainer.accelerator.wait_for_everyone()
+    if trainer.is_world_process_zero():
+        # Save PEFT model and tokenizer
+        logger.info(
+            f"Saving the model and tokenizer to {config.trainer.training_arguments.output_dir}"
+        )
+        trainer.save_model(config.trainer.training_arguments.output_dir)
+        tokenizer.save_pretrained(config.trainer.training_arguments.output_dir)
+    trainer.accelerator.wait_for_everyone()
 
     if torch.cuda.is_available():
         peak_gb = torch.cuda.max_memory_reserved() / (1024**3)
