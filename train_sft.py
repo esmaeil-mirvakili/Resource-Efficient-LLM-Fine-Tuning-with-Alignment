@@ -275,14 +275,14 @@ def prepare_trainer(
         and is_main_process()
     ):
         create_hf_gitignore_file(trainer_config.training_arguments.output_dir)
-    if in_distributed_mode() and getattr(
-        trainer_config.training_arguments, "deepspeed", None
-    ):
-        setattr(
-            trainer_config.training_arguments,
-            "load_best_model_at_end",
-            False,
-        )
+    # if in_distributed_mode() and getattr(
+    #     trainer_config.training_arguments, "deepspeed", None
+    # ):
+    #     setattr(
+    #         trainer_config.training_arguments,
+    #         "load_best_model_at_end",
+    #         False,
+        # )
     # gradient checkpointing
     if getattr(trainer_config.training_arguments, "gradient_checkpointing", None):
         model.gradient_checkpointing_enable()
