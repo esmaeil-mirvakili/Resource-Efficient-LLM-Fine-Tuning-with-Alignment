@@ -428,14 +428,15 @@ def main(config=None):
 
     train(trainer, config.trainer)
 
-    # Save PEFT model and tokenizer
-    logger.info(
-        f"Saving the model and tokenizer to {config.trainer.training_arguments.output_dir}"
-    )
-    # trainer.accelerator.wait_for_everyone()
-    # trainer.save_model(config.trainer.training_arguments.output_dir)
-    # tokenizer.save_pretrained(config.trainer.training_arguments.output_dir)
-    # trainer.accelerator.wait_for_everyone()
+    trainer.accelerator.wait_for_everyone()
+    if trainer.is_world_process_zero():
+        # Save PEFT model and tokenizer
+        logger.info(
+            f"Saving the model and tokenizer to {config.trainer.training_arguments.output_dir}"
+        )
+        trainer.save_model(config.trainer.training_arguments.output_dir)
+        tokenizer.save_pretrained(config.trainer.training_arguments.output_dir)
+    trainer.accelerator.wait_for_everyone()
 
     # Efficiency stats
     if torch.cuda.is_available():
