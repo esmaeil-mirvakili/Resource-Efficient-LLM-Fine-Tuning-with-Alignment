@@ -35,6 +35,7 @@ training_arguments:
   # deepspeed
   deepspeed: null
   ddp_find_unused_parameters: false
+  save_on_each_node: false
   # saving
   output_dir: ./outputs/sft_checkpoint
   save_strategy: steps
