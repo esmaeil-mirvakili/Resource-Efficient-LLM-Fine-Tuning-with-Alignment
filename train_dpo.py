@@ -219,34 +219,33 @@ def prepare_model_tokenizer_dpo(model_config):
 
     # Apply LoRA to POLICY only
     lora_config = LoraConfig(**config_to_plain(model_config.lora_config))
-    policy = get_peft_model(policy, lora_config)
 
-    # Reference model (frozen). Default to same checkpoint unless config provides ref_model_name.
-    ref_name = getattr(model_config, "model_name", None) or model_config.model_name
-    logger.info(f"Loading REFERENCE model: {ref_name}")
-    ref = AutoModelForCausalLM.from_pretrained(
-        ref_name,
-        quantization_config=bnb_config,  # quantized ref is fine; it’s frozen
-        device_map="auto",
-        dtype=(
-            torch.bfloat16
-            if getattr(model_config, "use_bf16", None) and is_bfloat16_supported()
-            else torch.float16
-        ),
-        trust_remote_code=model_config.model.trust_remote_code,
-        attn_implementation=(
-            model_config.model.attn_implementation if flash_attn_available() else None
-        ),
-    )
-    ref.config.use_cache = False
-    ref.config.pad_token_id = tokenizer.pad_token_id
-    align_tokenizer_and_model(tokenizer, ref)
+    # # Reference model (frozen). Default to same checkpoint unless config provides ref_model_name.
+    # ref_name = getattr(model_config, "model_name", None) or model_config.model_name
+    # logger.info(f"Loading REFERENCE model: {ref_name}")
+    # ref = AutoModelForCausalLM.from_pretrained(
+    #     ref_name,
+    #     quantization_config=bnb_config,  # quantized ref is fine; it’s frozen
+    #     device_map="auto",
+    #     dtype=(
+    #         torch.bfloat16
+    #         if getattr(model_config, "use_bf16", None) and is_bfloat16_supported()
+    #         else torch.float16
+    #     ),
+    #     trust_remote_code=model_config.model.trust_remote_code,
+    #     attn_implementation=(
+    #         model_config.model.attn_implementation if flash_attn_available() else None
+    #     ),
+    # )
+    # ref.config.use_cache = False
+    # ref.config.pad_token_id = tokenizer.pad_token_id
+    # align_tokenizer_and_model(tokenizer, ref)
 
-    # Freeze the reference
-    ref.requires_grad_(False)
-    ref.eval()
+    # # Freeze the reference
+    # ref.requires_grad_(False)
+    # ref.eval()
 
-    return policy, ref, tokenizer
+    return policy, None, tokenizer, lora_config
 
 
 def prepare_trainer_dpo(
@@ -256,6 +255,7 @@ def prepare_trainer_dpo(
     tokenizer,
     train_dataset,
     eval_dataset,
+    lora_config
 ):
     os.makedirs(trainer_config.training_arguments.output_dir, exist_ok=True)
     if (
@@ -287,6 +287,7 @@ def prepare_trainer_dpo(
         processing_class=tokenizer,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
+        peft_config=lora_config,
     )
 
     trainer.add_callback(VramPeakCallback())
@@ -339,7 +340,7 @@ def main(config=None):
         wandb.define_metric("global_step")
         wandb.define_metric("*", step_metric="global_step")
 
-    policy, ref, tokenizer = prepare_model_tokenizer_dpo(config.model)
+    policy, ref, tokenizer, lora_config = prepare_model_tokenizer_dpo(config.model)
 
     dataset = prepare_dataset(config.dataset, seed)
 
@@ -355,6 +356,7 @@ def main(config=None):
         tokenizer,
         dataset["train"],
         dataset[eval_split],
+        lora_config,
     )
 
     train(trainer, config.trainer)

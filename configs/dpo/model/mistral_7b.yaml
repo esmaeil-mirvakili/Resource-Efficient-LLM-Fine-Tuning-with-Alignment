@@ -5,7 +5,7 @@ model:
   trust_remote_code: true
   attn_implementation: flash_attention_2
 bnb_config:
-  load_in_8bit: true
+  load_in_4bit: true
   bnb_4bit_quant_type: nf4
   bnb_4bit_use_double_quant: true
 lora_config:
