@@ -48,6 +48,10 @@ class EvalPerplexityCallback(TrainerCallback):
             wandb.log({"eval/perplexity": ppl, "global_step": state.global_step})
 
 
+def is_main_process() -> bool:
+    return int(os.environ.get("RANK", "0")) == 0
+
+
 def init_hf_hub():
     hf_token = os.getenv("HUGGINGFACE_HUB_TOKEN", None)
     if hf_token is None:
@@ -266,8 +270,19 @@ def prepare_trainer(
     data_collator=None,
 ):
     os.makedirs(trainer_config.training_arguments.output_dir, exist_ok=True)
-    if getattr(trainer_config.training_arguments, "push_to_hub", False):
+    if (
+        getattr(trainer_config.training_arguments, "push_to_hub", False)
+        and is_main_process()
+    ):
         create_hf_gitignore_file(trainer_config.training_arguments.output_dir)
+    if in_distributed_mode() and getattr(
+        trainer_config.training_arguments, "deepspeed", None
+    ):
+        setattr(
+            trainer_config.training_arguments,
+            "load_best_model_at_end",
+            False,
+        )
     # gradient checkpointing
     if getattr(trainer_config.training_arguments, "gradient_checkpointing", None):
         model.gradient_checkpointing_enable()
@@ -326,14 +341,15 @@ def train(trainer, trainer_config):
 
 @hydra.main(version_base="1.3", config_path="configs/sft", config_name="sft_config")
 def main(config=None):
-    init_hf_hub()
+    if is_main_process():
+        init_hf_hub()
     seed = config.get("seed", 42)
     set_seed(seed)
 
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-    if getattr(config, "wandb", None):
+    if getattr(config, "wandb", None) and is_main_process():
         os.environ.setdefault("WANDB_PROJECT", config.wandb.project)
         wandb.init(
             project=config.wandb.project,
