@@ -195,7 +195,7 @@ def prepare_model_tokenizer_dpo(model_config):
     policy = AutoModelForCausalLM.from_pretrained(
         model_config.model_name,
         quantization_config=bnb_config,
-        device_map=None if in_distributed_mode() else "auto",
+        device_map="auto",
         dtype=(
             torch.bfloat16
             if getattr(model_config, "use_bf16", None) and is_bfloat16_supported()
@@ -223,7 +223,7 @@ def prepare_model_tokenizer_dpo(model_config):
     ref = AutoModelForCausalLM.from_pretrained(
         ref_name,
         quantization_config=bnb_config,  # quantized ref is fine; it’s frozen
-        device_map=None if in_distributed_mode() else "auto",
+        device_map="auto",
         dtype=(
             torch.bfloat16
             if getattr(model_config, "use_bf16", None) and is_bfloat16_supported()
