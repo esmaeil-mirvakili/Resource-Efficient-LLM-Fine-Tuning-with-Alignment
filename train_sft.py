@@ -210,7 +210,7 @@ def prepare_model_tokenizer(model_config):
     model = AutoModelForCausalLM.from_pretrained(
         model_config.model_name,
         quantization_config=bnb_config,
-        device_map="auto",
+        device_map=None if in_distributed_mode() else "auto",
         dtype=(
             torch.bfloat16
             if getattr(model_config, "use_bf16", None) and is_bfloat16_supported()
